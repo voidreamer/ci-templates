@@ -1,0 +1,67 @@
+name: iOS Build
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "22"
+        description: "Node.js version"
+      working-directory:
+        type: string
+        default: "frontend"
+        description: "Working directory"
+      app-id:
+        type: string
+        default: ""
+        description: "App ID for build summary"
+
+jobs:
+  ios:
+    name: iOS simulator build
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: npm ci
+
+      - name: Build web assets
+        working-directory: ${{ inputs.working-directory }}
+        run: npm run build
+
+      - name: Sync Capacitor
+        working-directory: ${{ inputs.working-directory }}
+        run: npx cap sync ios
+
+      - name: Build for simulator
+        working-directory: ${{ inputs.working-directory }}/ios/App
+        run: |
+          xcodebuild build \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Debug \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Build summary
+        run: |
+          echo "### iOS Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Status:** Success" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ inputs.app-id }}" ]; then
+            echo "- **App ID:** ${{ inputs.app-id }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "- **Type:** Simulator build (unsigned)" >> "$GITHUB_STEP_SUMMARY"

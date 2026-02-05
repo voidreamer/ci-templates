@@ -1,0 +1,70 @@
+# Example: Frontend-only CI/CD pipeline
+#
+# This shows a setup for a project with only a frontend:
+# - Node.js frontend (S3 + CloudFront)
+# - No backend deployment
+# - Lighthouse audits on PRs
+#
+# Copy this file to your project at .github/workflows/ci.yml
+# and adjust the values to match your setup.
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main, staging]
+
+jobs:
+  test:
+    uses: voidreamer/ci-templates/.github/workflows/test-node.yml@main
+    with:
+      working-directory: "."
+      build: true
+
+  lighthouse:
+    if: github.event_name == 'pull_request'
+    uses: voidreamer/ci-templates/.github/workflows/lighthouse.yml@main
+    with:
+      working-directory: "."
+
+  deploy-staging:
+    needs: [test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+    uses: voidreamer/ci-templates/.github/workflows/deploy-aws.yml@main
+    with:
+      environment: staging
+      terraform-state-key: staging/terraform.tfstate
+      custom-domain: staging.example.com
+      app-name: MySite
+      backend-type: none
+      run-migrations: false
+      frontend-dir: "."
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      VITE_ENV_VARS: |
+        VITE_API_URL=${{ secrets.API_URL_STAGING }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+  deploy-production:
+    needs: [test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: voidreamer/ci-templates/.github/workflows/deploy-aws.yml@main
+    with:
+      environment: production
+      terraform-state-key: prod/terraform.tfstate
+      custom-domain: example.com
+      app-name: MySite
+      backend-type: none
+      run-migrations: false
+      frontend-dir: "."
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      VITE_ENV_VARS: |
+        VITE_API_URL=${{ secrets.API_URL }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

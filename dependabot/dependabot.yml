@@ -1,0 +1,40 @@
+# Copy this file to .github/dependabot.yml in your project.
+# Adjust package ecosystems and directories to match your setup.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-deps:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    groups:
+      node-deps:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "terraform"
+    directory: "/infra"
+    schedule:
+      interval: "weekly"
+    groups:
+      terraform-deps:
+        patterns:
+          - "*"

@@ -1,0 +1,91 @@
+# Example: Full-stack CI/CD pipeline using Void CI Templates
+#
+# This shows a complete setup for a project with:
+# - Python backend (Lambda)
+# - Node.js frontend (S3 + CloudFront)
+# - Terraform infrastructure
+# - Staging and production environments
+# - Telegram notifications
+#
+# Copy this file to your project at .github/workflows/ci.yml
+# and adjust the values to match your setup.
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main, staging]
+
+jobs:
+  test-backend:
+    uses: voidreamer/ci-templates/.github/workflows/test-python.yml@main
+    with:
+      postgres: true
+    secrets:
+      DATABASE_URL: ${{ secrets.DATABASE_URL_TEST }}
+
+  test-frontend:
+    uses: voidreamer/ci-templates/.github/workflows/test-node.yml@main
+
+  lighthouse:
+    uses: voidreamer/ci-templates/.github/workflows/lighthouse.yml@main
+
+  deploy-staging:
+    needs: [test-backend, test-frontend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+    uses: voidreamer/ci-templates/.github/workflows/deploy-aws.yml@main
+    with:
+      environment: staging
+      terraform-state-key: staging/terraform.tfstate
+      custom-domain: staging-app.example.com
+      health-check-url: https://staging-app.example.com
+      app-name: MyApp
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      TERRAFORM_VARS: |
+        TF_VAR_environment=staging
+        TF_VAR_database_url=${{ secrets.DATABASE_URL_STAGING }}
+      VITE_ENV_VARS: |
+        VITE_API_URL=${{ secrets.API_URL_STAGING }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL_STAGING }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+  deploy-production:
+    needs: [test-backend, test-frontend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: voidreamer/ci-templates/.github/workflows/deploy-aws.yml@main
+    with:
+      environment: production
+      terraform-state-key: prod/terraform.tfstate
+      custom-domain: app.example.com
+      health-check-url: https://app.example.com
+      app-name: MyApp
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      TERRAFORM_VARS: |
+        TF_VAR_environment=prod
+        TF_VAR_database_url=${{ secrets.DATABASE_URL }}
+      VITE_ENV_VARS: |
+        VITE_API_URL=${{ secrets.API_URL }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+  android:
+    needs: [test-frontend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: voidreamer/ci-templates/.github/workflows/android-build.yml@main
+    with:
+      app-id: com.example.myapp
+
+  ios:
+    needs: [test-frontend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: voidreamer/ci-templates/.github/workflows/ios-build.yml@main
+    with:
+      app-id: com.example.myapp

@@ -1,0 +1,47 @@
+name: Lighthouse CI
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        type: string
+        default: "frontend"
+        description: "Working directory"
+      node-version:
+        type: string
+        default: "22"
+        description: "Node.js version"
+      config-path:
+        type: string
+        default: ".github/lighthouse/lighthouserc.json"
+        description: "Lighthouse CI config path"
+
+jobs:
+  lighthouse:
+    name: Lighthouse audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: npm ci
+
+      - name: Build
+        working-directory: ${{ inputs.working-directory }}
+        run: npm run build
+
+      - name: Run Lighthouse CI
+        uses: treosh/lighthouse-ci-action@v12
+        with:
+          configPath: ${{ inputs.config-path }}
+          uploadArtifacts: true
+          temporaryPublicStorage: true

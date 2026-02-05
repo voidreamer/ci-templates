@@ -1,0 +1,320 @@
+name: Deploy to AWS
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: "Deployment environment (staging or prod)"
+      aws-region:
+        type: string
+        default: "ca-central-1"
+        description: "AWS region"
+      python-version:
+        type: string
+        default: "3.11"
+        description: "Python version for backend"
+      node-version:
+        type: string
+        default: "22"
+        description: "Node.js version for frontend"
+      terraform-version:
+        type: string
+        default: "1.6.0"
+        description: "Terraform version"
+      infra-dir:
+        type: string
+        default: "infra"
+        description: "Terraform directory"
+      backend-dir:
+        type: string
+        default: "backend"
+        description: "Backend directory"
+      frontend-dir:
+        type: string
+        default: "frontend"
+        description: "Frontend directory"
+      terraform-state-key:
+        required: true
+        type: string
+        description: "Terraform state key (e.g. staging/terraform.tfstate)"
+      custom-domain:
+        type: string
+        default: ""
+        description: "Custom domain for CloudFront"
+      health-check-url:
+        type: string
+        default: ""
+        description: "URL to check after deploy"
+      app-name:
+        required: true
+        type: string
+        description: "Application name for notifications"
+      backend-type:
+        type: string
+        default: "lambda"
+        description: "Backend type: lambda or none"
+      run-migrations:
+        type: boolean
+        default: true
+        description: "Run database migrations"
+      migration-tool:
+        type: string
+        default: "alembic"
+        description: "Migration tool: alembic or none"
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      TERRAFORM_VARS:
+        required: false
+      VITE_ENV_VARS:
+        required: false
+      DATABASE_URL:
+        required: false
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    name: Terraform (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    outputs:
+      s3-bucket: ${{ steps.outputs.outputs.s3_bucket }}
+      cloudfront-id: ${{ steps.outputs.outputs.cloudfront_id }}
+      api-url: ${{ steps.outputs.outputs.api_url }}
+      lambda-function: ${{ steps.outputs.outputs.lambda_function }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Export Terraform variables
+        if: secrets.TERRAFORM_VARS != ''
+        run: |
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              export "$line"
+            fi
+          done <<< "${{ secrets.TERRAFORM_VARS }}"
+          env | grep ^TF_VAR_ >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        working-directory: ${{ inputs.infra-dir }}
+        run: |
+          terraform init \
+            -backend-config="key=${{ inputs.terraform-state-key }}"
+
+      - name: Terraform plan
+        working-directory: ${{ inputs.infra-dir }}
+        run: terraform plan -out=tfplan -input=false
+
+      - name: Terraform apply
+        working-directory: ${{ inputs.infra-dir }}
+        run: terraform apply -auto-approve -input=false tfplan
+
+      - name: Extract outputs
+        id: outputs
+        working-directory: ${{ inputs.infra-dir }}
+        run: |
+          echo "s3_bucket=$(terraform output -raw s3_bucket_name 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+          echo "cloudfront_id=$(terraform output -raw cloudfront_distribution_id 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+          echo "api_url=$(terraform output -raw api_url 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+          echo "lambda_function=$(terraform output -raw lambda_function_name 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+
+  backend:
+    name: Deploy backend
+    needs: terraform
+    if: inputs.backend-type == 'lambda'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Run migrations
+        if: inputs.run-migrations && inputs.migration-tool == 'alembic'
+        working-directory: ${{ inputs.backend-dir }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          pip install -r requirements.txt
+          python -m alembic upgrade head
+
+      - name: Package Lambda
+        working-directory: ${{ inputs.backend-dir }}
+        run: |
+          pip install -r requirements.txt -t package/
+          cp -r *.py package/ 2>/dev/null || true
+          cp -r src/ package/src/ 2>/dev/null || true
+          cp -r app/ package/app/ 2>/dev/null || true
+          cd package && zip -r ../lambda.zip . -x '*.pyc' '__pycache__/*'
+
+      - name: Deploy Lambda
+        working-directory: ${{ inputs.backend-dir }}
+        run: |
+          aws lambda update-function-code \
+            --function-name "${{ needs.terraform.outputs.lambda-function }}" \
+            --zip-file fileb://lambda.zip \
+            --publish
+
+      - name: Wait for Lambda update
+        run: |
+          aws lambda wait function-updated \
+            --function-name "${{ needs.terraform.outputs.lambda-function }}"
+
+  frontend:
+    name: Deploy frontend
+    needs: terraform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.frontend-dir }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.frontend-dir }}
+        run: npm ci
+
+      - name: Export VITE environment variables
+        if: secrets.VITE_ENV_VARS != ''
+        run: |
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              echo "$line" >> "$GITHUB_ENV"
+            fi
+          done <<< "${{ secrets.VITE_ENV_VARS }}"
+
+      - name: Build
+        working-directory: ${{ inputs.frontend-dir }}
+        run: npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Deploy to S3
+        working-directory: ${{ inputs.frontend-dir }}
+        run: |
+          aws s3 sync dist/ "s3://${{ needs.terraform.outputs.s3-bucket }}" \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "index.html" \
+            --exclude "*.json"
+          aws s3 cp dist/index.html "s3://${{ needs.terraform.outputs.s3-bucket }}/index.html" \
+            --cache-control "no-cache, no-store, must-revalidate"
+          aws s3 sync dist/ "s3://${{ needs.terraform.outputs.s3-bucket }}" \
+            --exclude "*" \
+            --include "*.json" \
+            --cache-control "no-cache"
+
+      - name: Invalidate CloudFront
+        if: needs.terraform.outputs.cloudfront-id != ''
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ needs.terraform.outputs.cloudfront-id }}" \
+            --paths "/*"
+
+  health-check:
+    name: Health check
+    needs: [terraform, backend, frontend]
+    if: always() && inputs.health-check-url != '' && !contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Wait for deployment propagation
+        run: sleep 30
+
+      - name: Check health
+        run: |
+          for i in 1 2 3 4 5; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.health-check-url }}" || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "Health check passed (HTTP $status)"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $status, retrying in 10s..."
+            sleep 10
+          done
+          echo "Health check failed after 5 attempts"
+          exit 1
+
+  notify:
+    name: Notify
+    needs: [terraform, backend, frontend, health-check]
+    if: always() && secrets.TELEGRAM_BOT_TOKEN != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send Telegram notification
+        run: |
+          if [ "${{ steps.status.outputs.result }}" = "success" ]; then
+            ICON="✅"
+            TEXT="deployed successfully"
+          else
+            ICON="❌"
+            TEXT="deploy failed"
+          fi
+
+          DOMAIN="${{ inputs.custom-domain }}"
+          URL_LINE=""
+          if [ -n "$DOMAIN" ]; then
+            URL_LINE="%0A🔗 https://${DOMAIN}"
+          fi
+
+          MESSAGE="${ICON} <b>${{ inputs.app-name }}</b> (${{ inputs.environment }}) ${TEXT}${URL_LINE}%0A%0A📦 ${GITHUB_SHA::7} by ${GITHUB_ACTOR}"
+
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" || true

@@ -1,0 +1,55 @@
+name: Notify Telegram
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        required: true
+        type: string
+        description: "Application name"
+      environment:
+        required: true
+        type: string
+        description: "Deployment environment"
+      status:
+        required: true
+        type: string
+        description: "Deploy status: success or failure"
+      url:
+        type: string
+        default: ""
+        description: "Deployed URL"
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: true
+      TELEGRAM_CHAT_ID:
+        required: true
+
+jobs:
+  notify:
+    name: Send notification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Telegram message
+        run: |
+          if [ "${{ inputs.status }}" = "success" ]; then
+            ICON="✅"
+            TEXT="deployed successfully"
+          else
+            ICON="❌"
+            TEXT="deploy failed"
+          fi
+
+          URL_LINE=""
+          if [ -n "${{ inputs.url }}" ]; then
+            URL_LINE="%0A🔗 ${{ inputs.url }}"
+          fi
+
+          MESSAGE="${ICON} <b>${{ inputs.app-name }}</b> (${{ inputs.environment }}) ${TEXT}${URL_LINE}%0A%0A📦 ${GITHUB_SHA::7} by ${GITHUB_ACTOR}"
+
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" || true

@@ -1,0 +1,61 @@
+name: Translate i18n
+
+on:
+  workflow_call:
+    inputs:
+      locales-path:
+        type: string
+        default: "frontend/public/locales"
+        description: "Path to locales directory"
+      source-lang:
+        type: string
+        default: "en"
+        description: "Source language code"
+      script-path:
+        type: string
+        default: "scripts/translate.js"
+        description: "Path to translation script"
+      node-version:
+        type: string
+        default: "20"
+        description: "Node.js version"
+    secrets:
+      DEEPL_API_KEY:
+        required: true
+
+jobs:
+  translate:
+    name: Auto-translate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install dependencies
+        run: npm install deepl-node
+
+      - name: Run translation
+        env:
+          DEEPL_API_KEY: ${{ secrets.DEEPL_API_KEY }}
+        run: node ${{ inputs.script-path }}
+
+      - name: Check for changes
+        id: changes
+        run: |
+          git diff --quiet || echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit translations
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ inputs.locales-path }}"
+          git commit -m "chore: auto-translate locales"
+          git push

@@ -1,0 +1,70 @@
+name: Test Node
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "22"
+        description: "Node.js version"
+      working-directory:
+        type: string
+        default: "frontend"
+        description: "Working directory"
+      test-command:
+        type: string
+        default: "npx vitest run"
+        description: "Test command to run"
+      build:
+        type: boolean
+        default: true
+        description: "Run build step"
+      lint:
+        type: boolean
+        default: true
+        description: "Run linting"
+      upload-build:
+        type: boolean
+        default: false
+        description: "Upload build artifacts"
+
+jobs:
+  test:
+    name: Node tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: npm ci
+
+      - name: Lint
+        if: inputs.lint
+        working-directory: ${{ inputs.working-directory }}
+        run: npm run lint
+
+      - name: Run tests
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.test-command }}
+
+      - name: Build
+        if: inputs.build
+        working-directory: ${{ inputs.working-directory }}
+        run: npm run build
+
+      - name: Upload build artifacts
+        if: inputs.upload-build && inputs.build
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: ${{ inputs.working-directory }}/dist
+          retention-days: 7

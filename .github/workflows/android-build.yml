@@ -1,0 +1,76 @@
+name: Android Build
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "22"
+        description: "Node.js version"
+      java-version:
+        type: string
+        default: "21"
+        description: "Java version"
+      working-directory:
+        type: string
+        default: "frontend"
+        description: "Working directory"
+      app-id:
+        type: string
+        default: ""
+        description: "App ID for build summary"
+
+jobs:
+  android:
+    name: Android debug build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: npm ci
+
+      - name: Build web assets
+        working-directory: ${{ inputs.working-directory }}
+        run: npm run build
+
+      - name: Sync Capacitor
+        working-directory: ${{ inputs.working-directory }}
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: ${{ inputs.working-directory }}/android
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: ${{ inputs.working-directory }}/android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+
+      - name: Build summary
+        run: |
+          echo "### Android Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Status:** Success" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ inputs.app-id }}" ]; then
+            echo "- **App ID:** ${{ inputs.app-id }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "- **Type:** Debug APK" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Artifact:** android-debug-apk" >> "$GITHUB_STEP_SUMMARY"
