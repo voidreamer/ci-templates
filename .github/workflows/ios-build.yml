@@ -1,5 +1,10 @@
 name: iOS Build
 
+# WARNING: This workflow uses macOS runners which consume GitHub Actions
+# minutes at a 10x multiplier. A 10-minute build costs 100 minutes.
+# Gate this workflow to tags/releases to protect your free tier budget.
+# Example: if: startsWith(github.ref, 'refs/tags/')
+
 on:
   workflow_call:
     inputs:
@@ -65,3 +70,4 @@ jobs:
             echo "- **App ID:** ${{ inputs.app-id }}" >> "$GITHUB_STEP_SUMMARY"
           fi
           echo "- **Type:** Simulator build (unsigned)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Runner:** macOS (10x minute multiplier)" >> "$GITHUB_STEP_SUMMARY"

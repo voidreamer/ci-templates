@@ -382,6 +382,14 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [main, staging]
+HEADER
+
+  # Add tags trigger when iOS builds are enabled (needed for tag-gated builds)
+  if [ "$ENABLE_MOBILE" = true ]; then
+    echo '    tags: ["v*"]'
+  fi
+
+  cat <<HEADER
   pull_request:
     branches: [main, staging]
 
@@ -508,11 +516,12 @@ JOB
       working-directory: "${FRONTEND_DIR}"
       app-id: com.example.${APP_NAME,,}
 
-  # WARNING: iOS builds use macOS runners (10x minute multiplier).
-  # Consider only running on tags: if: startsWith(github.ref, 'refs/tags/')
+  # iOS builds use macOS runners (10x minute multiplier).
+  # Gated to tags (releases) only to protect free tier.
+  # A single 10-min build = 100 of your 2,000 monthly minutes.
   ios:
     needs: [${mobile_needs}]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/')
     uses: ${TEMPLATES_REPO}/.github/workflows/ios-build.yml@${TEMPLATES_REF}
     with:
       working-directory: "${FRONTEND_DIR}"

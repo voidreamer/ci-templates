@@ -19,6 +19,7 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [main, staging]
+    tags: ["v*"]
   pull_request:
     branches: [main, staging]
 
@@ -85,9 +86,12 @@ jobs:
     with:
       app-id: com.example.myapp
 
+  # iOS builds use macOS runners which cost 10x minutes.
+  # Gated to tags (releases) only to protect the free tier.
+  # A single 10-min build = 100 minutes of your 2,000/month budget.
   ios:
     needs: [test-frontend]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/')
     uses: voidreamer/ci-templates/.github/workflows/ios-build.yml@main
     with:
       app-id: com.example.myapp
