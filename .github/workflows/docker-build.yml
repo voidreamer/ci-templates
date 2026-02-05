@@ -1,0 +1,113 @@
+name: Docker Build
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        type: string
+        default: ""
+        description: "Image name (default: repo name)"
+      registry:
+        type: string
+        default: "ghcr.io"
+        description: "Container registry"
+      context:
+        type: string
+        default: "."
+        description: "Docker build context"
+      dockerfile:
+        type: string
+        default: "Dockerfile"
+        description: "Dockerfile path"
+      platforms:
+        type: string
+        default: "linux/amd64"
+        description: "Target platforms (e.g. linux/amd64,linux/arm64)"
+      push:
+        type: boolean
+        default: true
+        description: "Push image to registry"
+      tag-strategy:
+        type: string
+        default: "sha"
+        description: "Tag strategy: sha, semver, or branch"
+      build-args:
+        type: string
+        default: ""
+        description: "Newline-separated build args (KEY=VALUE)"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build & push
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to registry
+        if: inputs.push
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.registry }}/${{ inputs.image-name || github.repository }}
+          tags: |
+            type=sha,enable=${{ inputs.tag-strategy == 'sha' }}
+            type=semver,pattern={{version}},enable=${{ inputs.tag-strategy == 'semver' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ inputs.tag-strategy == 'semver' }}
+            type=ref,event=branch,enable=${{ inputs.tag-strategy == 'branch' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Export build args
+        id: buildargs
+        if: inputs.build-args != ''
+        run: |
+          ARGS=""
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              ARGS="${ARGS}${line}\n"
+            fi
+          done <<< "${{ inputs.build-args }}"
+          echo "args<<EOF" >> "$GITHUB_OUTPUT"
+          echo -e "$ARGS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: ${{ steps.buildargs.outputs.args || '' }}
+
+      - name: Build summary
+        run: |
+          echo "### Docker Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image:** ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.build.outputs.digest }}" ]; then
+            echo "- **Digest:** ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "- **Pushed:** ${{ inputs.push }}" >> "$GITHUB_STEP_SUMMARY"

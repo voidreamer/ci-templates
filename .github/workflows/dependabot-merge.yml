@@ -1,0 +1,31 @@
+name: Dependabot Auto-Merge
+
+on:
+  workflow_call:
+    inputs:
+      update-types:
+        type: string
+        default: "patch,minor"
+        description: "Comma-separated update types to auto-merge (patch, minor, major)"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Auto-merge Dependabot
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ github.token }}
+
+      - name: Auto-merge eligible updates
+        if: contains(inputs.update-types, steps.metadata.outputs.update-type)
+        run: gh pr merge "${{ github.event.pull_request.number }}" --auto --squash
+        env:
+          GH_TOKEN: ${{ github.token }}

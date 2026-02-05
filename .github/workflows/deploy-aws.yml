@@ -63,11 +63,15 @@ on:
         type: string
         default: "alembic"
         description: "Migration tool: alembic or none"
+      aws-role-arn:
+        type: string
+        default: ""
+        description: "AWS IAM role ARN for OIDC authentication (recommended over static keys)"
     secrets:
       AWS_ACCESS_KEY_ID:
-        required: true
+        required: false
       AWS_SECRET_ACCESS_KEY:
-        required: true
+        required: false
       TERRAFORM_VARS:
         required: false
       VITE_ENV_VARS:
@@ -82,6 +86,10 @@ on:
 concurrency:
   group: deploy-${{ inputs.environment }}
   cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   terraform:
@@ -99,8 +107,9 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ inputs.aws-role-arn || '' }}
+          aws-access-key-id: ${{ inputs.aws-role-arn == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ inputs.aws-role-arn == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
           aws-region: ${{ inputs.aws-region }}
 
       - name: Setup Terraform
@@ -108,6 +117,14 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform-version }}
           terraform_wrapper: false
+
+      - name: Cache Terraform providers
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.infra-dir }}/.terraform/providers
+          key: terraform-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', inputs.infra-dir)) }}
+          restore-keys: |
+            terraform-${{ inputs.terraform-version }}-
 
       - name: Export Terraform variables
         if: secrets.TERRAFORM_VARS != ''
@@ -159,8 +176,9 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ inputs.aws-role-arn || '' }}
+          aws-access-key-id: ${{ inputs.aws-role-arn == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ inputs.aws-role-arn == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
           aws-region: ${{ inputs.aws-region }}
 
       - name: Run migrations
@@ -229,8 +247,9 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ inputs.aws-role-arn || '' }}
+          aws-access-key-id: ${{ inputs.aws-role-arn == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ inputs.aws-role-arn == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
           aws-region: ${{ inputs.aws-region }}
 
       - name: Deploy to S3

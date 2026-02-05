@@ -31,6 +31,10 @@ on:
         type: boolean
         default: false
         description: "Upload build artifacts"
+      audit:
+        type: boolean
+        default: true
+        description: "Run npm audit for vulnerability scanning"
 
 jobs:
   test:
@@ -50,6 +54,12 @@ jobs:
       - name: Install dependencies
         working-directory: ${{ inputs.working-directory }}
         run: npm ci
+
+      - name: Security audit
+        if: inputs.audit
+        working-directory: ${{ inputs.working-directory }}
+        continue-on-error: true
+        run: npm audit --audit-level=high
 
       - name: Lint
         if: inputs.lint

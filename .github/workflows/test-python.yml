@@ -31,6 +31,10 @@ on:
         type: boolean
         default: false
         description: "Spin up PostgreSQL service container"
+      audit:
+        type: boolean
+        default: true
+        description: "Run pip-audit for vulnerability scanning"
     secrets:
       DATABASE_URL:
         required: false
@@ -71,6 +75,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r ${{ inputs.requirements-file }}
+
+      - name: Security audit
+        if: inputs.audit
+        working-directory: ${{ inputs.working-directory }}
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r ${{ inputs.requirements-file }}
 
       - name: Lint
         if: inputs.lint

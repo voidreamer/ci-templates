@@ -1,0 +1,171 @@
+name: Rollback AWS
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: "Deployment environment (staging or prod)"
+      aws-region:
+        type: string
+        default: "ca-central-1"
+        description: "AWS region"
+      lambda-function:
+        type: string
+        default: ""
+        description: "Lambda function name to rollback"
+      lambda-alias:
+        type: string
+        default: ""
+        description: "Lambda alias to update (if using aliases)"
+      rollback-version:
+        type: string
+        default: ""
+        description: "Specific Lambda version to rollback to (empty = previous version)"
+      cloudfront-id:
+        type: string
+        default: ""
+        description: "CloudFront distribution ID to invalidate"
+      app-name:
+        required: true
+        type: string
+        description: "Application name for notifications"
+      aws-role-arn:
+        type: string
+        default: ""
+        description: "AWS IAM role ARN for OIDC authentication (recommended over static keys)"
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  rollback-lambda:
+    name: Rollback Lambda (${{ inputs.environment }})
+    if: inputs.lambda-function != ''
+    runs-on: ubuntu-latest
+    outputs:
+      rolled-back-to: ${{ steps.rollback.outputs.version }}
+      rolled-back-from: ${{ steps.rollback.outputs.previous }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn || '' }}
+          aws-access-key-id: ${{ inputs.aws-role-arn == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ inputs.aws-role-arn == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Rollback Lambda
+        id: rollback
+        run: |
+          FUNCTION="${{ inputs.lambda-function }}"
+
+          # Get current version
+          CURRENT=$(aws lambda get-function --function-name "$FUNCTION" \
+            --query 'Configuration.Version' --output text)
+          echo "previous=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${{ inputs.rollback-version }}" ]; then
+            TARGET="${{ inputs.rollback-version }}"
+          else
+            # List versions, find the one before current
+            TARGET=$(aws lambda list-versions-by-function \
+              --function-name "$FUNCTION" \
+              --query "Versions[?Version!='\$LATEST'].Version" \
+              --output text | tr '\t' '\n' | sort -n | tail -2 | head -1)
+          fi
+
+          if [ -z "$TARGET" ] || [ "$TARGET" = "$CURRENT" ]; then
+            echo "No previous version found to rollback to"
+            exit 1
+          fi
+
+          echo "Rolling back $FUNCTION from v$CURRENT to v$TARGET"
+          echo "version=$TARGET" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${{ inputs.lambda-alias }}" ]; then
+            aws lambda update-alias \
+              --function-name "$FUNCTION" \
+              --name "${{ inputs.lambda-alias }}" \
+              --function-version "$TARGET"
+          else
+            # Point $LATEST config to the previous version's code
+            CODE_LOCATION=$(aws lambda get-function \
+              --function-name "$FUNCTION" \
+              --qualifier "$TARGET" \
+              --query 'Code.Location' --output text)
+            curl -s "$CODE_LOCATION" -o /tmp/rollback.zip
+            aws lambda update-function-code \
+              --function-name "$FUNCTION" \
+              --zip-file fileb:///tmp/rollback.zip \
+              --publish
+          fi
+
+      - name: Wait for Lambda update
+        run: |
+          aws lambda wait function-updated \
+            --function-name "${{ inputs.lambda-function }}"
+
+  invalidate-cdn:
+    name: Invalidate CloudFront
+    if: inputs.cloudfront-id != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn || '' }}
+          aws-access-key-id: ${{ inputs.aws-role-arn == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ inputs.aws-role-arn == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ inputs.cloudfront-id }}" \
+            --paths "/*"
+
+  notify:
+    name: Notify
+    needs: [rollback-lambda, invalidate-cdn]
+    if: always() && secrets.TELEGRAM_BOT_TOKEN != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Telegram notification
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            ICON="❌"
+            TEXT="rollback failed"
+          else
+            ICON="🔄"
+            TEXT="rolled back successfully"
+          fi
+
+          DETAILS=""
+          if [ -n "${{ needs.rollback-lambda.outputs.rolled-back-to }}" ]; then
+            DETAILS="%0A↩️ v${{ needs.rollback-lambda.outputs.rolled-back-from }} → v${{ needs.rollback-lambda.outputs.rolled-back-to }}"
+          fi
+
+          MESSAGE="${ICON} <b>${{ inputs.app-name }}</b> (${{ inputs.environment }}) ${TEXT}${DETAILS}%0A%0A📦 ${GITHUB_SHA::7} by ${GITHUB_ACTOR}"
+
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" || true

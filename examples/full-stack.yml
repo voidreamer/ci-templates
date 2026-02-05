@@ -6,9 +6,13 @@
 # - Terraform infrastructure
 # - Staging and production environments
 # - Telegram notifications
+# - OIDC authentication (no static AWS keys)
 #
 # Copy this file to your project at .github/workflows/ci.yml
 # and adjust the values to match your setup.
+#
+# OIDC setup: Create an IAM role with trust policy for
+# GitHub OIDC provider and pass its ARN via aws-role-arn.
 
 name: CI/CD Pipeline
 
@@ -42,9 +46,8 @@ jobs:
       custom-domain: staging-app.example.com
       health-check-url: https://staging-app.example.com
       app-name: MyApp
+      aws-role-arn: arn:aws:iam::123456789012:role/github-actions-deploy
     secrets:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       TERRAFORM_VARS: |
         TF_VAR_environment=staging
         TF_VAR_database_url=${{ secrets.DATABASE_URL_STAGING }}
@@ -64,9 +67,8 @@ jobs:
       custom-domain: app.example.com
       health-check-url: https://app.example.com
       app-name: MyApp
+      aws-role-arn: arn:aws:iam::123456789012:role/github-actions-deploy
     secrets:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       TERRAFORM_VARS: |
         TF_VAR_environment=prod
         TF_VAR_database_url=${{ secrets.DATABASE_URL }}

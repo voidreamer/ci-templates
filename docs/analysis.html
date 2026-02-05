@@ -1,0 +1,1247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CI Templates - Architecture Analysis</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2333;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+    --purple: #bc8cff;
+    --pink: #f778ba;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+
+  .app { max-width: 1280px; margin: 0 auto; padding: 20px; }
+
+  /* Navigation */
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: rgba(13, 17, 23, 0.9);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 0;
+    margin: -20px -20px 30px;
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+  .nav-inner {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+  .nav-inner::-webkit-scrollbar { display: none; }
+  .nav-btn {
+    padding: 8px 16px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-dim);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+    transition: all 0.2s;
+  }
+  .nav-btn:hover { border-color: var(--accent); color: var(--text); }
+  .nav-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  /* Header */
+  .header {
+    text-align: center;
+    padding: 40px 0 30px;
+  }
+  .header h1 {
+    font-size: 2.4em;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 8px;
+  }
+  .header p { color: var(--text-dim); font-size: 1.1em; }
+
+  .badge-row {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+  .badge {
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .badge-blue { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--accent2); }
+  .badge-purple { background: rgba(188,140,255,0.15); color: var(--purple); }
+
+  /* Section */
+  .section { margin-bottom: 40px; animation: fadeIn 0.3s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  .section-title {
+    font-size: 1.5em;
+    margin-bottom: 20px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Cards */
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    transition: all 0.2s;
+    cursor: default;
+  }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .card-clickable { cursor: pointer; }
+  .card h3 { font-size: 1em; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .card p { color: var(--text-dim); font-size: 0.9em; }
+
+  /* Architecture Diagram */
+  .arch-diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 30px;
+    overflow-x: auto;
+  }
+  .arch-row {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+  }
+  .arch-node {
+    padding: 12px 20px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+    min-width: 140px;
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+  }
+  .arch-node:hover { transform: scale(1.05); }
+  .arch-node.trigger { background: rgba(88,166,255,0.15); border: 1px solid var(--accent); color: var(--accent); }
+  .arch-node.test { background: rgba(63,185,80,0.15); border: 1px solid var(--accent2); color: var(--accent2); }
+  .arch-node.deploy { background: rgba(210,153,34,0.15); border: 1px solid var(--warn); color: var(--warn); }
+  .arch-node.notify { background: rgba(188,140,255,0.15); border: 1px solid var(--purple); color: var(--purple); }
+  .arch-node.mobile { background: rgba(247,120,186,0.15); border: 1px solid var(--pink); color: var(--pink); }
+  .arch-node.infra { background: rgba(248,81,73,0.15); border: 1px solid var(--danger); color: var(--danger); }
+
+  .arch-arrow {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 20px;
+    margin: 4px 0;
+  }
+
+  .arch-detail {
+    margin-top: 20px;
+    padding: 20px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    animation: fadeIn 0.2s ease;
+  }
+  .arch-detail h4 { margin-bottom: 8px; }
+  .arch-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .param-chip {
+    background: var(--bg);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-family: 'SF Mono', monospace;
+    color: var(--text-dim);
+  }
+  .param-chip span { color: var(--accent); }
+
+  /* Score bars */
+  .score-section { margin-bottom: 20px; }
+  .score-label {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    font-size: 0.9em;
+  }
+  .score-bar {
+    height: 8px;
+    background: var(--surface2);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .score-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.8s ease;
+  }
+  .score-green { background: var(--accent2); }
+  .score-blue { background: var(--accent); }
+  .score-yellow { background: var(--warn); }
+  .score-red { background: var(--danger); }
+
+  /* Comparison table */
+  .comp-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    font-size: 0.9em;
+  }
+  .comp-table th {
+    background: var(--surface2);
+    padding: 14px 16px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .comp-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .comp-table tr:last-child td { border-bottom: none; }
+  .comp-table tr:hover td { background: rgba(88,166,255,0.03); }
+  .comp-table .you { color: var(--accent); font-weight: 600; }
+
+  .check { color: var(--accent2); }
+  .cross { color: var(--danger); }
+  .partial { color: var(--warn); }
+
+  /* Strength / Weakness lists */
+  .sw-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  @media (max-width: 768px) { .sw-grid { grid-template-columns: 1fr; } }
+  .sw-list { list-style: none; }
+  .sw-list li {
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    font-size: 0.9em;
+    transition: border-color 0.2s;
+  }
+  .sw-list li:hover { border-color: var(--accent); }
+  .sw-list li strong { display: block; margin-bottom: 4px; }
+  .sw-list .icon { margin-right: 6px; }
+
+  /* File tree */
+  .file-tree {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  .file-tree .dir { color: var(--accent); }
+  .file-tree .file { color: var(--text-dim); }
+  .file-tree .highlight { color: var(--accent2); }
+
+  /* Tier Analysis */
+  .tier-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 16px;
+  }
+  .tier-card h3 { margin-bottom: 12px; }
+  .tier-meter {
+    display: flex;
+    gap: 3px;
+    margin: 10px 0;
+  }
+  .tier-block {
+    height: 24px;
+    flex: 1;
+    border-radius: 4px;
+    transition: all 0.3s;
+  }
+  .tier-block.filled { opacity: 1; }
+  .tier-block.empty { opacity: 0.15; }
+  .tier-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  /* Recommendations */
+  .rec-card {
+    background: var(--surface);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+  }
+  .rec-card.high { border-left-color: var(--danger); }
+  .rec-card.med { border-left-color: var(--warn); }
+  .rec-card.low { border-left-color: var(--accent2); }
+  .rec-priority {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 4px;
+  }
+  .rec-priority.high { color: var(--danger); }
+  .rec-priority.med { color: var(--warn); }
+  .rec-priority.low { color: var(--accent2); }
+
+  /* Tabs */
+  .tab-row {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0;
+  }
+  .tab-btn {
+    padding: 10px 20px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.2s;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  /* Tooltip */
+  .tooltip-wrap { position: relative; display: inline-block; }
+  .tooltip-content {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 50;
+    color: var(--text-dim);
+  }
+  .tooltip-wrap:hover .tooltip-content { display: block; }
+
+  /* Stats row */
+  .stats-row {
+    display: flex;
+    gap: 16px;
+    margin: 20px 0;
+    flex-wrap: wrap;
+  }
+  .stat-box {
+    flex: 1;
+    min-width: 150px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    text-align: center;
+  }
+  .stat-num {
+    font-size: 2em;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .stat-label { font-size: 0.8em; color: var(--text-dim); margin-top: 4px; }
+
+  /* Workflow detail panel */
+  .wf-detail {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-top: 16px;
+  }
+  .wf-detail h3 { margin-bottom: 4px; }
+  .wf-detail .desc { color: var(--text-dim); margin-bottom: 16px; font-size: 0.9em; }
+  .input-table {
+    width: 100%;
+    font-size: 0.85em;
+    border-collapse: collapse;
+  }
+  .input-table th {
+    text-align: left;
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .input-table td {
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+    font-family: 'SF Mono', monospace;
+    font-size: 12px;
+  }
+  .input-table tr:last-child td { border-bottom: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ─── Data ────────────────────────────────────────────────────────
+
+const workflows = [
+  {
+    id: 'test-node',
+    name: 'test-node.yml',
+    label: 'Node.js Tests',
+    type: 'test',
+    desc: 'Test and build Node.js projects with optional linting and artifact uploads.',
+    inputs: [
+      { name: 'node-version', default: '"22"', desc: 'Node.js version' },
+      { name: 'working-directory', default: '"frontend"', desc: 'Project directory' },
+      { name: 'test-command', default: '"npx vitest run"', desc: 'Test command' },
+      { name: 'test-env', default: '""', desc: 'Env vars for tests' },
+      { name: 'lint', default: 'true', desc: 'Run npm run lint' },
+      { name: 'build', default: 'true', desc: 'Run npm run build' },
+      { name: 'upload-build', default: 'false', desc: 'Upload dist artifacts' },
+    ],
+    steps: ['Checkout', 'Setup Node + cache', 'npm ci', 'Lint', 'Export env', 'Test', 'Build', 'Upload artifacts'],
+  },
+  {
+    id: 'test-python',
+    name: 'test-python.yml',
+    label: 'Python Tests',
+    type: 'test',
+    desc: 'Test Python projects with optional PostgreSQL, ruff linting, and DB migrations.',
+    inputs: [
+      { name: 'python-version', default: '"3.11"', desc: 'Python version' },
+      { name: 'working-directory', default: '"backend"', desc: 'Project directory' },
+      { name: 'requirements-file', default: '"requirements.txt"', desc: 'Dependency file' },
+      { name: 'test-command', default: '"pytest tests/ -v"', desc: 'Test command' },
+      { name: 'test-env', default: '""', desc: 'Env vars for tests' },
+      { name: 'lint', default: 'true', desc: 'Run ruff lint + format' },
+      { name: 'postgres', default: 'false', desc: 'Enable PostgreSQL 16' },
+    ],
+    steps: ['Checkout', 'Setup Python + cache', 'Install deps', 'Ruff lint/format', 'Export env', 'Run tests'],
+  },
+  {
+    id: 'deploy-aws',
+    name: 'deploy-aws.yml',
+    label: 'AWS Deploy',
+    type: 'deploy',
+    desc: 'Full AWS deployment: Terraform, Lambda backend, S3+CloudFront frontend, health checks, notifications.',
+    inputs: [
+      { name: 'environment', default: '(required)', desc: 'staging / production' },
+      { name: 'app-name', default: '(required)', desc: 'For notifications' },
+      { name: 'terraform-state-key', default: '(required)', desc: 'S3 state key' },
+      { name: 'aws-region', default: '"ca-central-1"', desc: 'AWS region' },
+      { name: 'backend-type', default: '"lambda"', desc: 'lambda or none' },
+      { name: 'run-migrations', default: 'true', desc: 'Alembic migrations' },
+      { name: 'health-check-url', default: '""', desc: 'Post-deploy health check' },
+    ],
+    steps: ['Terraform init/plan/apply', 'Extract outputs', 'Alembic migrate', 'Package Lambda', 'Update Lambda', 'npm ci + build', 'S3 sync (smart cache)', 'CloudFront invalidate', 'Health check (5 retries)', 'Telegram notify'],
+  },
+  {
+    id: 'notify-telegram',
+    name: 'notify-telegram.yml',
+    label: 'Telegram Notify',
+    type: 'notify',
+    desc: 'Send formatted deployment notifications to Telegram with status, URL, and commit info.',
+    inputs: [
+      { name: 'app-name', default: '(required)', desc: 'Application name' },
+      { name: 'environment', default: '(required)', desc: 'Environment' },
+      { name: 'status', default: '(required)', desc: 'success / failure' },
+      { name: 'url', default: '""', desc: 'Deployed URL' },
+    ],
+    steps: ['Format message', 'Send via Telegram Bot API'],
+  },
+  {
+    id: 'translate-i18n',
+    name: 'translate-i18n.yml',
+    label: 'i18n Translate',
+    type: 'notify',
+    desc: 'Auto-translate locale files using DeepL API and commit changes.',
+    inputs: [
+      { name: 'locales-path', default: '"frontend/public/locales"', desc: 'Locales directory' },
+      { name: 'source-lang', default: '"en"', desc: 'Source language' },
+      { name: 'script-path', default: '"scripts/translate.js"', desc: 'Translation script' },
+    ],
+    steps: ['Checkout', 'Setup Node', 'Install deepl-node', 'Run translate script', 'Detect changes', 'Auto-commit'],
+  },
+  {
+    id: 'lighthouse',
+    name: 'lighthouse.yml',
+    label: 'Lighthouse CI',
+    type: 'test',
+    desc: 'Run Lighthouse performance audits against the built frontend.',
+    inputs: [
+      { name: 'working-directory', default: '"frontend"', desc: 'Project directory' },
+      { name: 'node-version', default: '"22"', desc: 'Node.js version' },
+      { name: 'config-path', default: '".github/lighthouse/..."', desc: 'Config path' },
+    ],
+    steps: ['Checkout', 'Setup Node + cache', 'npm ci', 'Build', 'Run Lighthouse CI', 'Upload artifacts'],
+  },
+  {
+    id: 'android-build',
+    name: 'android-build.yml',
+    label: 'Android Build',
+    type: 'mobile',
+    desc: 'Build Capacitor Android debug APK with Gradle.',
+    inputs: [
+      { name: 'node-version', default: '"22"', desc: 'Node.js version' },
+      { name: 'java-version', default: '"21"', desc: 'Java version' },
+      { name: 'working-directory', default: '"frontend"', desc: 'Project directory' },
+      { name: 'app-id', default: '""', desc: 'App ID for summary' },
+    ],
+    steps: ['Checkout', 'Setup Node + Java', 'npm ci', 'Build web', 'Cap sync', 'Gradle assembleDebug', 'Upload APK', 'Build summary'],
+  },
+  {
+    id: 'ios-build',
+    name: 'ios-build.yml',
+    label: 'iOS Build',
+    type: 'mobile',
+    desc: 'Build Capacitor iOS simulator app (unsigned) via xcodebuild.',
+    inputs: [
+      { name: 'node-version', default: '"22"', desc: 'Node.js version' },
+      { name: 'working-directory', default: '"frontend"', desc: 'Project directory' },
+      { name: 'app-id', default: '""', desc: 'App ID for summary' },
+    ],
+    steps: ['Checkout', 'Setup Node + cache', 'npm ci', 'Build web', 'Cap sync', 'xcodebuild (simulator)', 'Build summary'],
+  },
+];
+
+const strengths = [
+  { title: 'Modular & Composable', detail: 'Each workflow is a standalone unit using workflow_call. Projects compose what they need via job dependencies, like Lego blocks.' },
+  { title: 'Smart Caching Strategy', detail: 'S3 deploys use immutable 1-year cache for assets, no-cache for index.html/JSON. npm/pip caches speed up CI.' },
+  { title: 'Concurrency Safety', detail: 'deploy-aws uses concurrency groups per environment, preventing race conditions on simultaneous deploys. cancel-in-progress: false ensures safety.' },
+  { title: 'Sensible Defaults', detail: 'Every input has a production-ready default (Node 22, Python 3.11, vitest, ruff). Override only what you need.' },
+  { title: 'Multi-Environment', detail: 'First-class staging/production support with per-environment secrets, Terraform state keys, and deploy gates.' },
+  { title: 'Full-Stack Coverage', detail: 'Covers the entire stack: backend tests, frontend tests, Terraform IaC, Lambda deploy, S3+CDN hosting, mobile builds, performance audits, notifications.' },
+  { title: 'Defensive Error Handling', detail: 'Health checks use continue-on-error. Terraform outputs use fallbacks. Notifications never block deploys.' },
+  { title: 'Mobile CI Included', detail: 'Capacitor iOS + Android build workflows are included, which is uncommon in personal CI template collections.' },
+  { title: 'Secret Injection Pattern', detail: 'Standardized newline-separated KEY=VALUE secret injection for both test env vars and deploy-time config. Clean and consistent.' },
+  { title: 'Self-Testing Repository', detail: 'The repo has its own ci.yml that lints all YAML files, dogfooding CI best practices.' },
+];
+
+const weaknesses = [
+  { title: 'No Rollback Strategy', detail: 'If a deploy passes health checks but breaks later, there\'s no automatic rollback. Lambda versioning, S3 versioning, or Terraform state snapshots would help.', severity: 'high' },
+  { title: 'AWS Lock-In', detail: 'Backend deployment is Lambda-specific. The Terraform outputs assume specific AWS resource names. No GCP/Azure path.', severity: 'med' },
+  { title: 'No Docker Workflow', detail: 'Missing container build/push workflows. Many projects eventually need Docker for custom runtimes or ECS/Fargate.', severity: 'med' },
+  { title: 'No Matrix Testing', detail: 'Tests run on a single version. No multi-version or multi-OS matrix strategy for catching compatibility issues.', severity: 'low' },
+  { title: 'Mobile Builds Are Debug-Only', detail: 'Android builds are debug APKs, iOS is simulator-only. No code signing, no Play Store / TestFlight distribution.', severity: 'med' },
+  { title: 'No Dependency Security Scanning', detail: 'No npm audit, pip-audit, or Dependabot auto-merge workflow. The dependabot.yml is a template but not wired into workflows.', severity: 'high' },
+  { title: 'No Caching for Terraform', detail: 'Terraform provider plugins are downloaded fresh each run. A cache step would save ~15-30 seconds per deploy.', severity: 'low' },
+  { title: 'Translation Script External', detail: 'translate-i18n.yml requires a separate translate.js script to exist. It won\'t work without that external dependency.', severity: 'low' },
+  { title: 'No PR Preview Environments', detail: 'No ephemeral staging per PR. Professional setups often deploy a temporary environment per pull request.', severity: 'med' },
+  { title: 'No Secrets Rotation Guidance', detail: 'Heavy reliance on long-lived AWS access keys instead of OIDC federation. No documentation on rotating secrets.', severity: 'high' },
+];
+
+const comparisonData = [
+  {
+    feature: 'Reusable Workflow Modules',
+    you: { val: 'full', text: '9 workflows' },
+    vercel: { val: 'na', text: 'Built-in' },
+    ghActions: { val: 'full', text: 'Marketplace' },
+    gitlab: { val: 'full', text: 'Includes' },
+  },
+  {
+    feature: 'Zero-Config Deploys',
+    you: { val: 'partial', text: 'Needs inputs' },
+    vercel: { val: 'full', text: 'Auto-detect' },
+    ghActions: { val: 'none', text: 'Manual' },
+    gitlab: { val: 'partial', text: 'Auto DevOps' },
+  },
+  {
+    feature: 'IaC (Terraform)',
+    you: { val: 'full', text: 'Built-in' },
+    vercel: { val: 'none', text: 'N/A' },
+    ghActions: { val: 'partial', text: 'Via marketplace' },
+    gitlab: { val: 'partial', text: 'Via templates' },
+  },
+  {
+    feature: 'Mobile Builds (iOS/Android)',
+    you: { val: 'partial', text: 'Debug only' },
+    vercel: { val: 'none', text: 'N/A' },
+    ghActions: { val: 'full', text: 'Via actions' },
+    gitlab: { val: 'partial', text: 'Limited' },
+  },
+  {
+    feature: 'Preview / Ephemeral Envs',
+    you: { val: 'none', text: 'Missing' },
+    vercel: { val: 'full', text: 'Auto per PR' },
+    ghActions: { val: 'partial', text: 'Manual setup' },
+    gitlab: { val: 'full', text: 'Review Apps' },
+  },
+  {
+    feature: 'Performance Audits',
+    you: { val: 'full', text: 'Lighthouse' },
+    vercel: { val: 'full', text: 'Web Vitals' },
+    ghActions: { val: 'partial', text: 'Via actions' },
+    gitlab: { val: 'partial', text: 'Browser tests' },
+  },
+  {
+    feature: 'Security Scanning',
+    you: { val: 'none', text: 'Missing' },
+    vercel: { val: 'partial', text: 'Basic' },
+    ghActions: { val: 'full', text: 'CodeQL, Dependabot' },
+    gitlab: { val: 'full', text: 'SAST, DAST, Deps' },
+  },
+  {
+    feature: 'Rollback / Canary',
+    you: { val: 'none', text: 'Missing' },
+    vercel: { val: 'full', text: 'Instant rollback' },
+    ghActions: { val: 'partial', text: 'Manual' },
+    gitlab: { val: 'full', text: 'Built-in' },
+  },
+  {
+    feature: 'Notifications',
+    you: { val: 'full', text: 'Telegram' },
+    vercel: { val: 'full', text: 'Slack, Email' },
+    ghActions: { val: 'partial', text: 'Via actions' },
+    gitlab: { val: 'full', text: 'Multi-channel' },
+  },
+  {
+    feature: 'Cost (Solo Dev)',
+    you: { val: 'full', text: 'Free tier!' },
+    vercel: { val: 'full', text: 'Hobby free' },
+    ghActions: { val: 'full', text: '2000 min/mo' },
+    gitlab: { val: 'full', text: '400 min/mo' },
+  },
+  {
+    feature: 'OIDC / Keyless Auth',
+    you: { val: 'none', text: 'Static keys' },
+    vercel: { val: 'full', text: 'Built-in' },
+    ghActions: { val: 'full', text: 'OIDC support' },
+    gitlab: { val: 'full', text: 'OIDC support' },
+  },
+  {
+    feature: 'Multi-Cloud Support',
+    you: { val: 'none', text: 'AWS only' },
+    vercel: { val: 'none', text: 'Vercel only' },
+    ghActions: { val: 'full', text: 'Any provider' },
+    gitlab: { val: 'full', text: 'Any provider' },
+  },
+];
+
+const freeTierAnalysis = [
+  {
+    resource: 'GitHub Actions Minutes',
+    limit: '2,000 min/month (free)',
+    usage: 'Moderate',
+    percent: 40,
+    color: 'green',
+    note: 'Node test ~2min, Python test ~2min, Deploy ~5min. At 3 deploys/day you\'d use ~700 min/month. iOS builds use macOS (10x multiplier!) so be careful.',
+  },
+  {
+    resource: 'GitHub Actions Storage',
+    limit: '500 MB (free)',
+    usage: 'Low',
+    percent: 15,
+    color: 'green',
+    note: 'Artifacts have 7-14 day retention. APK uploads are the biggest consumer. Frontend build artifacts are small.',
+  },
+  {
+    resource: 'AWS Free Tier (Lambda)',
+    limit: '1M requests + 400K GB-s/month',
+    usage: 'Very Low',
+    percent: 10,
+    color: 'green',
+    note: 'Solo dev API traffic is negligible. You won\'t come close to Lambda free tier limits.',
+  },
+  {
+    resource: 'AWS Free Tier (S3)',
+    limit: '5 GB storage, 20K GET/month',
+    usage: 'Low',
+    percent: 20,
+    color: 'green',
+    note: 'Frontend static files are tiny. S3 sync on each deploy stays well within limits.',
+  },
+  {
+    resource: 'AWS CloudFront',
+    limit: '1 TB transfer + 10M requests/month',
+    usage: 'Very Low',
+    percent: 5,
+    color: 'green',
+    note: 'Solo dev traffic is minimal. Smart cache headers reduce origin requests.',
+  },
+  {
+    resource: 'DeepL API Free',
+    limit: '500K chars/month',
+    usage: 'Varies',
+    percent: 30,
+    color: 'yellow',
+    note: 'Depends on content volume. Small apps stay within limits. Watch out for re-translating unchanged strings.',
+  },
+  {
+    resource: 'Telegram Bot API',
+    limit: 'Unlimited (free)',
+    usage: 'Trivial',
+    percent: 2,
+    color: 'green',
+    note: 'Telegram bots have no rate limits for personal use. Perfect free notification channel.',
+  },
+  {
+    resource: 'macOS Runners (iOS)',
+    limit: 'Uses 10x minutes multiplier',
+    usage: 'DANGER',
+    percent: 85,
+    color: 'red',
+    note: 'A 10-min iOS build costs 100 minutes! Limit iOS builds to release branches only. This is your biggest free-tier risk.',
+  },
+];
+
+const recommendations = [
+  { priority: 'high', title: 'Add OIDC Federation for AWS', desc: 'Replace static AWS_ACCESS_KEY_ID/SECRET with GitHub OIDC. Zero secrets to rotate, more secure, and it\'s free. Add aws-actions/configure-aws-credentials with role-to-assume.' },
+  { priority: 'high', title: 'Add Security Scanning', desc: 'Add a simple npm audit / pip-audit step to test workflows. Free, takes ~10 seconds, catches known vulnerabilities before deploy.' },
+  { priority: 'high', title: 'Gate iOS Builds', desc: 'Only run ios-build on tags or release branches. The 10x macOS minute multiplier will eat your free tier fast.' },
+  { priority: 'med', title: 'Add Terraform Provider Cache', desc: 'Cache ~/.terraform.d/plugin-cache between runs. Saves 15-30s per deploy and reduces bandwidth.' },
+  { priority: 'med', title: 'Add Simple Rollback', desc: 'Lambda supports $LATEST + published versions. Add a rollback workflow that points the alias to the previous version. S3 versioning can restore previous frontend builds.' },
+  { priority: 'med', title: 'Add Docker Workflow', desc: 'A reusable docker-build.yml that builds, tags, and pushes to GitHub Container Registry (free for public repos) would round out the collection.' },
+  { priority: 'low', title: 'PR Preview Environments', desc: 'For solo dev this is a nice-to-have. A lightweight approach: deploy to an S3 prefix per PR, add a comment with the URL.' },
+  { priority: 'low', title: 'Add Dependabot Auto-Merge', desc: 'Wire the dependabot.yml template into a workflow that auto-merges patch updates after tests pass.' },
+];
+
+
+// ─── Components ──────────────────────────────────────────────────
+
+const ValIcon = ({ val }) => {
+  if (val === 'full') return <span className="check">&#10003;</span>;
+  if (val === 'partial') return <span className="partial">~</span>;
+  if (val === 'none') return <span className="cross">&#10007;</span>;
+  return <span className="text-dim">-</span>;
+};
+
+const ScoreBar = ({ label, value, max = 100, color = 'blue', suffix = '' }) => (
+  <div className="score-section">
+    <div className="score-label">
+      <span>{label}</span>
+      <span style={{ color: 'var(--text-dim)' }}>{value}{suffix}</span>
+    </div>
+    <div className="score-bar">
+      <div className={`score-fill score-${color}`} style={{ width: `${(value / max) * 100}%` }} />
+    </div>
+  </div>
+);
+
+const TierMeter = ({ percent, color }) => {
+  const blocks = 20;
+  const filled = Math.round((percent / 100) * blocks);
+  const colorMap = { green: 'var(--accent2)', yellow: 'var(--warn)', red: 'var(--danger)', blue: 'var(--accent)' };
+  return (
+    <div>
+      <div className="tier-meter">
+        {Array.from({ length: blocks }, (_, i) => (
+          <div
+            key={i}
+            className={`tier-block ${i < filled ? 'filled' : 'empty'}`}
+            style={{ background: colorMap[color] || colorMap.blue }}
+          />
+        ))}
+      </div>
+      <div className="tier-labels">
+        <span>0%</span>
+        <span>Estimated usage: ~{percent}%</span>
+        <span>100%</span>
+      </div>
+    </div>
+  );
+};
+
+// ─── Sections ────────────────────────────────────────────────────
+
+const OverviewSection = () => (
+  <div className="section">
+    <h2 className="section-title">Project Overview</h2>
+    <div className="stats-row">
+      <div className="stat-box"><div className="stat-num">9</div><div className="stat-label">Reusable Workflows</div></div>
+      <div className="stat-box"><div className="stat-num">2</div><div className="stat-label">Example Pipelines</div></div>
+      <div className="stat-box"><div className="stat-num">50+</div><div className="stat-label">Configurable Inputs</div></div>
+      <div className="stat-box"><div className="stat-num">5</div><div className="stat-label">Deploy Jobs</div></div>
+    </div>
+    <div className="file-tree">
+      <div><span className="dir">ci-templates/</span></div>
+      <div>&nbsp; <span className="dir">.github/workflows/</span></div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="file">ci.yml</span> &mdash; Self-testing (yamllint)</div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="highlight">test-node.yml</span> &mdash; Node.js test + build</div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="highlight">test-python.yml</span> &mdash; Python test + lint</div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="highlight">deploy-aws.yml</span> &mdash; Full AWS deployment</div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="file">notify-telegram.yml</span> &mdash; Telegram notifications</div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="file">translate-i18n.yml</span> &mdash; DeepL translations</div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="file">lighthouse.yml</span> &mdash; Performance audits</div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="file">android-build.yml</span> &mdash; Capacitor Android</div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="file">ios-build.yml</span> &mdash; Capacitor iOS</div>
+      <div>&nbsp; <span className="dir">examples/</span></div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="file">frontend-only.yml</span> &mdash; Frontend project template</div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="file">full-stack.yml</span> &mdash; Full-stack template</div>
+      <div>&nbsp; <span className="dir">dependabot/</span></div>
+      <div>&nbsp;&nbsp;&nbsp; <span className="file">dependabot.yml</span> &mdash; Dependency update config</div>
+    </div>
+  </div>
+);
+
+const ArchitectureSection = () => {
+  const [selected, setSelected] = useState(null);
+  const wf = selected ? workflows.find(w => w.id === selected) : null;
+
+  return (
+    <div className="section">
+      <h2 className="section-title">Architecture</h2>
+      <p style={{ color: 'var(--text-dim)', marginBottom: 20 }}>Click any node to see its details, inputs, and pipeline steps.</p>
+      <div className="arch-diagram">
+        <div className="arch-row">
+          <div className="arch-node trigger" onClick={() => setSelected(null)}>
+            push / PR / workflow_call
+          </div>
+        </div>
+        <div className="arch-arrow">&#8595;</div>
+        <div className="arch-row">
+          {workflows.filter(w => w.type === 'test').map(w => (
+            <div key={w.id} className={`arch-node test ${selected === w.id ? 'selected' : ''}`} onClick={() => setSelected(w.id)} style={selected === w.id ? { boxShadow: '0 0 0 2px var(--accent2)' } : {}}>
+              {w.label}
+            </div>
+          ))}
+        </div>
+        <div className="arch-arrow">&#8595;</div>
+        <div className="arch-row">
+          {workflows.filter(w => w.type === 'deploy').map(w => (
+            <div key={w.id} className={`arch-node deploy ${selected === w.id ? 'selected' : ''}`} onClick={() => setSelected(w.id)} style={selected === w.id ? { boxShadow: '0 0 0 2px var(--warn)' } : {}}>
+              {w.label}
+            </div>
+          ))}
+        </div>
+        <div className="arch-arrow">&#8595;</div>
+        <div className="arch-row">
+          {workflows.filter(w => w.type === 'notify').map(w => (
+            <div key={w.id} className={`arch-node notify ${selected === w.id ? 'selected' : ''}`} onClick={() => setSelected(w.id)} style={selected === w.id ? { boxShadow: '0 0 0 2px var(--purple)' } : {}}>
+              {w.label}
+            </div>
+          ))}
+          {workflows.filter(w => w.type === 'mobile').map(w => (
+            <div key={w.id} className={`arch-node mobile ${selected === w.id ? 'selected' : ''}`} onClick={() => setSelected(w.id)} style={selected === w.id ? { boxShadow: '0 0 0 2px var(--pink)' } : {}}>
+              {w.label}
+            </div>
+          ))}
+        </div>
+
+        {wf && (
+          <div className="arch-detail">
+            <h4>{wf.name}</h4>
+            <p style={{ color: 'var(--text-dim)', fontSize: '0.9em', marginBottom: 16 }}>{wf.desc}</p>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+              <div>
+                <h5 style={{ marginBottom: 8, color: 'var(--accent)' }}>Inputs</h5>
+                <table className="input-table">
+                  <thead><tr><th>Name</th><th>Default</th></tr></thead>
+                  <tbody>
+                    {wf.inputs.map(inp => (
+                      <tr key={inp.name}>
+                        <td style={{ color: 'var(--text)' }}>{inp.name}</td>
+                        <td title={inp.desc}>{inp.default}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div>
+                <h5 style={{ marginBottom: 8, color: 'var(--accent2)' }}>Pipeline Steps</h5>
+                <ol style={{ paddingLeft: 20, color: 'var(--text-dim)', fontSize: '0.85em' }}>
+                  {wf.steps.map((s, i) => <li key={i} style={{ marginBottom: 4 }}>{s}</li>)}
+                </ol>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ marginTop: 24 }}>
+        <h3 style={{ marginBottom: 12 }}>Composition Model</h3>
+        <div className="card-grid">
+          <div className="card">
+            <h3>Full-Stack Pipeline</h3>
+            <p>test-python + test-node &#8594; deploy-aws (staging) &#8594; deploy-aws (prod) &#8594; android-build + ios-build</p>
+          </div>
+          <div className="card">
+            <h3>Frontend-Only Pipeline</h3>
+            <p>test-node &#8594; lighthouse (PR only) &#8594; deploy-aws (backend-type: none)</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const StrengthsWeaknesses = () => (
+  <div className="section">
+    <h2 className="section-title">Strengths & Weaknesses</h2>
+    <div className="sw-grid">
+      <div>
+        <h3 style={{ color: 'var(--accent2)', marginBottom: 12 }}>Strengths</h3>
+        <ul className="sw-list">
+          {strengths.map((s, i) => (
+            <li key={i}>
+              <strong><span className="icon" style={{ color: 'var(--accent2)' }}>+</span> {s.title}</strong>
+              <span style={{ color: 'var(--text-dim)' }}>{s.detail}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div>
+        <h3 style={{ color: 'var(--danger)', marginBottom: 12 }}>Weaknesses</h3>
+        <ul className="sw-list">
+          {weaknesses.map((w, i) => (
+            <li key={i} style={{
+              borderLeftWidth: 3,
+              borderLeftStyle: 'solid',
+              borderLeftColor: w.severity === 'high' ? 'var(--danger)' : w.severity === 'med' ? 'var(--warn)' : 'var(--text-dim)',
+            }}>
+              <strong>
+                <span className="icon" style={{ color: w.severity === 'high' ? 'var(--danger)' : w.severity === 'med' ? 'var(--warn)' : 'var(--text-dim)' }}>
+                  {w.severity === 'high' ? '!!!' : w.severity === 'med' ? '!!' : '!'}
+                </span>
+                {' '}{w.title}
+                <span style={{ fontSize: '0.75em', fontWeight: 400, marginLeft: 8, color: w.severity === 'high' ? 'var(--danger)' : w.severity === 'med' ? 'var(--warn)' : 'var(--text-dim)' }}>
+                  {w.severity}
+                </span>
+              </strong>
+              <span style={{ color: 'var(--text-dim)' }}>{w.detail}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+
+    <div style={{ marginTop: 30 }}>
+      <h3 style={{ marginBottom: 16 }}>Quality Scores</h3>
+      <div style={{ maxWidth: 600 }}>
+        <ScoreBar label="Modularity & Reusability" value={92} color="green" suffix="/100" />
+        <ScoreBar label="Configuration Flexibility" value={88} color="green" suffix="/100" />
+        <ScoreBar label="Deployment Safety" value={65} color="yellow" suffix="/100" />
+        <ScoreBar label="Security Posture" value={35} color="red" suffix="/100" />
+        <ScoreBar label="Free Tier Optimization" value={78} color="blue" suffix="/100" />
+        <ScoreBar label="Documentation" value={85} color="green" suffix="/100" />
+        <ScoreBar label="Mobile CI Maturity" value={40} color="yellow" suffix="/100" />
+        <ScoreBar label="Overall Solo-Dev Score" value={74} color="blue" suffix="/100" />
+      </div>
+    </div>
+  </div>
+);
+
+const ComparisonSection = () => (
+  <div className="section">
+    <h2 className="section-title">vs. Professional Solutions</h2>
+    <p style={{ color: 'var(--text-dim)', marginBottom: 20 }}>
+      How your templates compare to managed platforms and standard CI/CD setups.
+      Context: you're a solo dev maximizing free tiers.
+    </p>
+    <div style={{ overflowX: 'auto' }}>
+      <table className="comp-table">
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th className="you">Your Templates</th>
+            <th>Vercel / Netlify</th>
+            <th>GitHub Actions (raw)</th>
+            <th>GitLab CI</th>
+          </tr>
+        </thead>
+        <tbody>
+          {comparisonData.map((row, i) => (
+            <tr key={i}>
+              <td>{row.feature}</td>
+              <td className="you"><ValIcon val={row.you.val} /> {row.you.text}</td>
+              <td><ValIcon val={row.vercel.val} /> {row.vercel.text}</td>
+              <td><ValIcon val={row.ghActions.val} /> {row.ghActions.text}</td>
+              <td><ValIcon val={row.gitlab.val} /> {row.gitlab.text}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+
+    <div style={{ marginTop: 30 }}>
+      <h3 style={{ marginBottom: 16 }}>Where You Win</h3>
+      <div className="card-grid">
+        <div className="card" style={{ borderLeft: '3px solid var(--accent2)' }}>
+          <h3>vs. Vercel/Netlify</h3>
+          <p>You have Terraform IaC, Lambda backend, database migrations, and full infrastructure control. They give you zero-config frontend deploys but lock you into their platform. Your approach gives <strong>10x more flexibility</strong> at the cost of more config.</p>
+        </div>
+        <div className="card" style={{ borderLeft: '3px solid var(--accent2)' }}>
+          <h3>vs. Raw GitHub Actions</h3>
+          <p>Without reusable templates, every project reinvents CI/CD from scratch. Your templates are essentially a <strong>personal GitHub Actions marketplace</strong>. You get consistency, less copy-paste, and centralized updates.</p>
+        </div>
+        <div className="card" style={{ borderLeft: '3px solid var(--accent2)' }}>
+          <h3>vs. GitLab CI</h3>
+          <p>GitLab has more built-in security features, but your setup avoids the 400 min/month free limit (GitHub gives 2,000). For solo dev, <strong>GitHub's free tier is 5x more generous</strong> on compute.</p>
+        </div>
+      </div>
+    </div>
+
+    <div style={{ marginTop: 24 }}>
+      <h3 style={{ marginBottom: 16 }}>Where They Win</h3>
+      <div className="card-grid">
+        <div className="card" style={{ borderLeft: '3px solid var(--danger)' }}>
+          <h3>Vercel: DX & Previews</h3>
+          <p>Automatic preview deployments per PR, instant rollbacks, edge functions, and analytics. Their developer experience is hard to beat with custom CI/CD.</p>
+        </div>
+        <div className="card" style={{ borderLeft: '3px solid var(--danger)' }}>
+          <h3>GitLab: Security Suite</h3>
+          <p>SAST, DAST, dependency scanning, container scanning, license compliance - all built-in. You'd need 5+ additional workflows to match their security coverage.</p>
+        </div>
+        <div className="card" style={{ borderLeft: '3px solid var(--danger)' }}>
+          <h3>All: Rollback & Canary</h3>
+          <p>Professional platforms all have instant rollback. Vercel keeps every deployment addressable. Your setup has no rollback mechanism at all.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+const FreeTierSection = () => (
+  <div className="section">
+    <h2 className="section-title">Free Tier Analysis</h2>
+    <p style={{ color: 'var(--text-dim)', marginBottom: 24 }}>
+      Estimated resource usage for a solo developer running ~2-3 deploys per day with occasional mobile builds.
+    </p>
+
+    {freeTierAnalysis.map((item, i) => (
+      <div key={i} className="tier-card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+          <h3 style={{ fontSize: '1em' }}>{item.resource}</h3>
+          <span style={{
+            padding: '3px 10px',
+            borderRadius: 12,
+            fontSize: 11,
+            fontWeight: 700,
+            background: item.color === 'green' ? 'rgba(63,185,80,0.15)' : item.color === 'yellow' ? 'rgba(210,153,34,0.15)' : 'rgba(248,81,73,0.15)',
+            color: item.color === 'green' ? 'var(--accent2)' : item.color === 'yellow' ? 'var(--warn)' : 'var(--danger)',
+          }}>
+            {item.usage}
+          </span>
+        </div>
+        <div style={{ fontSize: '0.85em', color: 'var(--text-dim)', margin: '6px 0' }}>Limit: {item.limit}</div>
+        <TierMeter percent={item.percent} color={item.color} />
+        <p style={{ fontSize: '0.85em', color: 'var(--text-dim)', marginTop: 10 }}>{item.note}</p>
+      </div>
+    ))}
+
+    <div className="card" style={{ marginTop: 24, borderLeft: '3px solid var(--danger)' }}>
+      <h3 style={{ color: 'var(--danger)', marginBottom: 8 }}>The #1 Free Tier Killer: macOS Runners</h3>
+      <p>
+        iOS builds on macOS runners consume minutes at a <strong>10x multiplier</strong>. A single 10-minute iOS build costs 100 of your 2,000 monthly minutes.
+        If you run iOS builds on every push to main, you could burn through your entire free tier in ~20 builds.
+      </p>
+      <p style={{ marginTop: 8 }}>
+        <strong>Recommendation:</strong> Only trigger ios-build.yml on git tags (releases) or a dedicated release branch. This alone could save you 500-1,500 minutes per month.
+      </p>
+    </div>
+
+    <div className="card" style={{ marginTop: 16, borderLeft: '3px solid var(--accent2)' }}>
+      <h3 style={{ color: 'var(--accent2)', marginBottom: 8 }}>Monthly Budget Estimate (Solo Dev)</h3>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12, marginTop: 12 }}>
+        <div style={{ background: 'var(--bg)', padding: 12, borderRadius: 8 }}>
+          <div style={{ fontSize: '0.8em', color: 'var(--text-dim)' }}>Node tests (60 runs)</div>
+          <div style={{ fontWeight: 700 }}>~120 min</div>
+        </div>
+        <div style={{ background: 'var(--bg)', padding: 12, borderRadius: 8 }}>
+          <div style={{ fontSize: '0.8em', color: 'var(--text-dim)' }}>Python tests (60 runs)</div>
+          <div style={{ fontWeight: 700 }}>~150 min</div>
+        </div>
+        <div style={{ background: 'var(--bg)', padding: 12, borderRadius: 8 }}>
+          <div style={{ fontSize: '0.8em', color: 'var(--text-dim)' }}>AWS deploys (40 runs)</div>
+          <div style={{ fontWeight: 700 }}>~200 min</div>
+        </div>
+        <div style={{ background: 'var(--bg)', padding: 12, borderRadius: 8 }}>
+          <div style={{ fontSize: '0.8em', color: 'var(--text-dim)' }}>Android builds (4 runs)</div>
+          <div style={{ fontWeight: 700 }}>~40 min</div>
+        </div>
+        <div style={{ background: 'var(--bg)', padding: 12, borderRadius: 8 }}>
+          <div style={{ fontSize: '0.8em', color: 'var(--text-dim)' }}>iOS builds (2 runs)</div>
+          <div style={{ fontWeight: 700, color: 'var(--warn)' }}>~200 min (10x!)</div>
+        </div>
+        <div style={{ background: 'var(--bg)', padding: 12, borderRadius: 8 }}>
+          <div style={{ fontSize: '0.8em', color: 'var(--text-dim)' }}>Lighthouse + misc</div>
+          <div style={{ fontWeight: 700 }}>~50 min</div>
+        </div>
+      </div>
+      <div style={{ marginTop: 16, padding: 12, background: 'var(--bg)', borderRadius: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontWeight: 700, fontSize: '1.1em' }}>Total estimated</span>
+        <span style={{ fontWeight: 700, fontSize: '1.3em', color: 'var(--accent)' }}>~760 / 2,000 min (38%)</span>
+      </div>
+    </div>
+  </div>
+);
+
+const RecommendationsSection = () => (
+  <div className="section">
+    <h2 className="section-title">Recommendations</h2>
+    <p style={{ color: 'var(--text-dim)', marginBottom: 20 }}>
+      Prioritized improvements for a solo developer. High-impact, low-effort changes first.
+    </p>
+
+    {recommendations.map((rec, i) => (
+      <div key={i} className={`rec-card ${rec.priority}`}>
+        <div className={`rec-priority ${rec.priority}`}>{rec.priority} priority</div>
+        <h4>{rec.title}</h4>
+        <p style={{ color: 'var(--text-dim)', fontSize: '0.9em', marginTop: 4 }}>{rec.desc}</p>
+      </div>
+    ))}
+
+    <div className="card" style={{ marginTop: 24, background: 'var(--surface2)' }}>
+      <h3 style={{ marginBottom: 12 }}>Maturity Roadmap</h3>
+      <div style={{ position: 'relative' }}>
+        {[
+          { phase: 'Current', label: 'Functional CI/CD', color: 'var(--accent)', items: ['Modular workflows', 'Test + Deploy', 'Notifications', 'Mobile builds'] },
+          { phase: 'Next', label: 'Hardened', color: 'var(--warn)', items: ['OIDC auth', 'Security scanning', 'iOS build gating', 'Terraform caching'] },
+          { phase: 'Future', label: 'Professional', color: 'var(--accent2)', items: ['Rollback workflows', 'Docker CI', 'PR previews', 'Canary deploys'] },
+        ].map((phase, i) => (
+          <div key={i} style={{ display: 'flex', gap: 16, marginBottom: 20, alignItems: 'flex-start' }}>
+            <div style={{ minWidth: 80, paddingTop: 2 }}>
+              <span style={{ color: phase.color, fontWeight: 700, fontSize: '0.9em' }}>{phase.phase}</span>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>{phase.label}</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {phase.items.map((item, j) => (
+                  <span key={j} style={{
+                    padding: '3px 10px',
+                    background: 'var(--bg)',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    color: 'var(--text-dim)',
+                  }}>{item}</span>
+                ))}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+);
+
+
+// ─── Main App ────────────────────────────────────────────────────
+
+const sections = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'architecture', label: 'Architecture' },
+  { id: 'strengths', label: 'Strengths & Weaknesses' },
+  { id: 'comparison', label: 'vs. Pro Solutions' },
+  { id: 'freetier', label: 'Free Tier' },
+  { id: 'recommendations', label: 'Recommendations' },
+];
+
+function App() {
+  const [active, setActive] = useState('overview');
+
+  const renderSection = () => {
+    switch (active) {
+      case 'overview': return <OverviewSection />;
+      case 'architecture': return <ArchitectureSection />;
+      case 'strengths': return <StrengthsWeaknesses />;
+      case 'comparison': return <ComparisonSection />;
+      case 'freetier': return <FreeTierSection />;
+      case 'recommendations': return <RecommendationsSection />;
+      default: return <OverviewSection />;
+    }
+  };
+
+  return (
+    <div className="app">
+      <div className="header">
+        <h1>ci-templates</h1>
+        <p>Architecture Analysis & Infrastructure Review</p>
+        <div className="badge-row">
+          <span className="badge badge-blue">GitHub Actions</span>
+          <span className="badge badge-green">AWS Serverless</span>
+          <span className="badge badge-purple">Solo Developer</span>
+        </div>
+      </div>
+
+      <div className="nav">
+        <div className="nav-inner">
+          {sections.map(s => (
+            <button
+              key={s.id}
+              className={`nav-btn ${active === s.id ? 'active' : ''}`}
+              onClick={() => setActive(s.id)}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {renderSection()}
+
+      <div style={{ textAlign: 'center', padding: '40px 0 20px', color: 'var(--text-dim)', fontSize: '0.8em' }}>
+        Generated by Claude Code &mdash; voidreamer/ci-templates analysis
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
