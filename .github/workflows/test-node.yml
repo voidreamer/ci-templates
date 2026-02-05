@@ -15,6 +15,10 @@ on:
         type: string
         default: "npx vitest run"
         description: "Test command to run"
+      test-env:
+        type: string
+        default: ""
+        description: "Newline-separated KEY=VALUE env vars for test step"
       build:
         type: boolean
         default: true
@@ -51,6 +55,15 @@ jobs:
         if: inputs.lint
         working-directory: ${{ inputs.working-directory }}
         run: npm run lint
+
+      - name: Export test env vars
+        if: inputs.test-env != ''
+        run: |
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              echo "$line" >> "$GITHUB_ENV"
+            fi
+          done <<< "${{ inputs.test-env }}"
 
       - name: Run tests
         working-directory: ${{ inputs.working-directory }}

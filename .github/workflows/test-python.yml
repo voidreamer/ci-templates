@@ -19,6 +19,10 @@ on:
         type: string
         default: "python -m pytest tests/ -v --tb=short"
         description: "Test command to run"
+      test-env:
+        type: string
+        default: ""
+        description: "Newline-separated KEY=VALUE env vars for test step"
       lint:
         type: boolean
         default: true
@@ -75,6 +79,15 @@ jobs:
           pip install ruff
           ruff check .
           ruff format --check .
+
+      - name: Export test env vars
+        if: inputs.test-env != ''
+        run: |
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              echo "$line" >> "$GITHUB_ENV"
+            fi
+          done <<< "${{ inputs.test-env }}"
 
       - name: Run tests
         working-directory: ${{ inputs.working-directory }}
