@@ -98,19 +98,68 @@ PROJECT_TYPE=$(choose "What type of project?" \
 echo ""
 
 ask "Application name" "$(basename "$PROJECT_ROOT")" APP_NAME
-ask "AWS region" "ca-central-1" AWS_REGION
-echo ""
 
-# Auth method
-AUTH_METHOD=$(choose "AWS authentication method?" \
-  "OIDC (recommended - no static keys)" \
-  "Static keys (AWS_ACCESS_KEY_ID / SECRET)")
-echo ""
-
-AWS_ROLE_ARN=""
-if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
-  ask "AWS IAM Role ARN (leave empty to fill later)" "" AWS_ROLE_ARN
+# Cloud provider (skip for docker - it's cloud-agnostic)
+CLOUD_PROVIDER=""
+if [[ "$PROJECT_TYPE" != *"docker"* ]]; then
+  CLOUD_PROVIDER=$(choose "Cloud provider?" \
+    "AWS (Lambda + S3 + CloudFront)" \
+    "GCP (Cloud Run + Cloud Storage + CDN)" \
+    "Azure (Functions + Blob Storage + CDN)")
+  echo ""
 fi
+
+# Cloud-specific config
+AWS_REGION=""
+AWS_ROLE_ARN=""
+GCP_PROJECT_ID=""
+GCP_REGION=""
+GCP_WIF_PROVIDER=""
+GCP_SERVICE_ACCOUNT=""
+AZURE_SUBSCRIPTION_ID=""
+AZURE_TENANT_ID=""
+AZURE_CLIENT_ID=""
+AZURE_RESOURCE_GROUP=""
+AZURE_LOCATION=""
+AUTH_METHOD=""
+
+case "$CLOUD_PROVIDER" in
+  *"AWS"*)
+    ask "AWS region" "ca-central-1" AWS_REGION
+    AUTH_METHOD=$(choose "AWS authentication method?" \
+      "OIDC (recommended - no static keys)" \
+      "Static keys (AWS_ACCESS_KEY_ID / SECRET)")
+    echo ""
+    if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
+      ask "AWS IAM Role ARN (leave empty to fill later)" "" AWS_ROLE_ARN
+    fi
+    ;;
+  *"GCP"*)
+    ask "GCP project ID" "" GCP_PROJECT_ID
+    ask "GCP region" "us-central1" GCP_REGION
+    AUTH_METHOD=$(choose "GCP authentication method?" \
+      "Workload Identity Federation (recommended - no static keys)" \
+      "Service Account Key (GCP_SA_KEY secret)")
+    echo ""
+    if [[ "$AUTH_METHOD" == *"Workload"* ]]; then
+      ask "Workload Identity Provider (leave empty to fill later)" "" GCP_WIF_PROVIDER
+      ask "Service Account email (leave empty to fill later)" "" GCP_SERVICE_ACCOUNT
+    fi
+    ;;
+  *"Azure"*)
+    ask "Azure subscription ID" "" AZURE_SUBSCRIPTION_ID
+    ask "Azure resource group" "" AZURE_RESOURCE_GROUP
+    ask "Azure location" "canadacentral" AZURE_LOCATION
+    AUTH_METHOD=$(choose "Azure authentication method?" \
+      "OIDC / Federated Credentials (recommended - no static keys)" \
+      "Service Principal credentials (AZURE_CREDENTIALS secret)")
+    echo ""
+    if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
+      ask "Azure tenant ID (leave empty to fill later)" "" AZURE_TENANT_ID
+      ask "Azure client/app ID (leave empty to fill later)" "" AZURE_CLIENT_ID
+    fi
+    ;;
+esac
 
 # Domain
 ask "Custom domain (leave empty for none)" "" CUSTOM_DOMAIN
@@ -162,44 +211,22 @@ mkdir -p "$PROJECT_ROOT/.github/workflows"
 
 CI_FILE="$PROJECT_ROOT/.github/workflows/ci.yml"
 
-# Helper to build the AWS auth section
-aws_secrets_block() {
-  if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
-    echo ""
-  else
-    cat <<SECRETS
-      AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
-SECRETS
-  fi
-}
+# ─── Deploy Job Generators (per cloud) ──────────────────────────
 
-aws_role_input() {
-  if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
-    local arn="${AWS_ROLE_ARN:-arn:aws:iam::ACCOUNT_ID:role/github-actions-deploy}"
-    echo "      aws-role-arn: ${arn}"
-  fi
-}
-
-generate_deploy_job() {
+generate_common_domain_inputs() {
   local env_name="$1"
-  local branch="$2"
-  local state_key="$3"
-  local domain="${4:-}"
-  local needs="$5"
+  local domain="${2:-}"
+  if [ -n "$domain" ]; then
+    local display_domain="$domain"
+    if [ "$env_name" = "staging" ]; then
+      display_domain="staging-${domain}"
+    fi
+    echo "      custom-domain: ${display_domain}"
+    echo "      health-check-url: https://${display_domain}"
+  fi
+}
 
-  cat <<JOB
-  deploy-${env_name}:
-    needs: [${needs}]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/${branch}'
-    uses: ${TEMPLATES_REPO}/.github/workflows/deploy-aws.yml@${TEMPLATES_REF}
-    with:
-      environment: ${env_name}
-      terraform-state-key: ${state_key}
-      app-name: ${APP_NAME}
-      aws-region: ${AWS_REGION}
-JOB
-
+generate_common_dir_inputs() {
   if [[ "$PROJECT_TYPE" == *"frontend-only"* ]]; then
     echo "      backend-type: none"
     echo "      run-migrations: false"
@@ -210,21 +237,10 @@ JOB
     echo "      backend-dir: \"${BACKEND_DIR}\""
     echo "      frontend-dir: \"${FRONTEND_DIR}\""
   fi
+}
 
-  if [ -n "$domain" ]; then
-    local display_domain="$domain"
-    if [ "$env_name" = "staging" ]; then
-      display_domain="staging-${domain}"
-    fi
-    echo "      custom-domain: ${display_domain}"
-    echo "      health-check-url: https://${display_domain}"
-  fi
-
-  aws_role_input
-
-  echo "    secrets:"
-  aws_secrets_block
-
+generate_common_secrets() {
+  local env_name="$1"
   if [[ "$PROJECT_TYPE" != *"frontend-only"* ]]; then
     cat <<SECRETS
       TERRAFORM_VARS: |
@@ -232,20 +248,125 @@ JOB
       DATABASE_URL: \${{ secrets.DATABASE_URL_$(echo "$env_name" | tr '[:lower:]' '[:upper:]') }}
 SECRETS
   fi
-
   if [[ "$PROJECT_TYPE" == *"frontend"* ]] || [[ "$PROJECT_TYPE" == *"full-stack"* ]]; then
     cat <<SECRETS
       VITE_ENV_VARS: |
         VITE_API_URL=\${{ secrets.API_URL_$(echo "$env_name" | tr '[:lower:]' '[:upper:]') }}
 SECRETS
   fi
-
   if [ "$ENABLE_TELEGRAM" = true ]; then
     cat <<SECRETS
       TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: \${{ secrets.TELEGRAM_CHAT_ID }}
 SECRETS
   fi
+}
+
+generate_deploy_job() {
+  local env_name="$1"
+  local branch="$2"
+  local state_key="$3"
+  local domain="${4:-}"
+  local needs="$5"
+
+  case "$CLOUD_PROVIDER" in
+    *"AWS"*)
+      cat <<JOB
+  deploy-${env_name}:
+    needs: [${needs}]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/${branch}'
+    uses: ${TEMPLATES_REPO}/.github/workflows/deploy-aws.yml@${TEMPLATES_REF}
+    with:
+      environment: ${env_name}
+      terraform-state-key: ${state_key}
+      app-name: ${APP_NAME}
+      aws-region: ${AWS_REGION}
+JOB
+      generate_common_dir_inputs
+      generate_common_domain_inputs "$env_name" "$domain"
+      if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
+        echo "      aws-role-arn: ${AWS_ROLE_ARN:-arn:aws:iam::ACCOUNT_ID:role/github-actions-deploy}"
+      fi
+      echo "    secrets:"
+      if [[ "$AUTH_METHOD" != *"OIDC"* ]]; then
+        cat <<SECRETS
+      AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+SECRETS
+      fi
+      generate_common_secrets "$env_name"
+      ;;
+
+    *"GCP"*)
+      cat <<JOB
+  deploy-${env_name}:
+    needs: [${needs}]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/${branch}'
+    uses: ${TEMPLATES_REPO}/.github/workflows/deploy-gcp.yml@${TEMPLATES_REF}
+    with:
+      environment: ${env_name}
+      gcp-project-id: ${GCP_PROJECT_ID}
+      gcp-region: ${GCP_REGION}
+      terraform-state-bucket: \${{ vars.TF_STATE_BUCKET }}
+      terraform-state-prefix: ${env_name}/terraform
+      app-name: ${APP_NAME}
+JOB
+      if [[ "$PROJECT_TYPE" == *"frontend-only"* ]]; then
+        echo "      backend-type: none"
+        echo "      frontend-dir: \"${FRONTEND_DIR}\""
+      elif [[ "$PROJECT_TYPE" == *"backend-only"* ]]; then
+        echo "      backend-dir: \"${BACKEND_DIR}\""
+      else
+        echo "      backend-dir: \"${BACKEND_DIR}\""
+        echo "      frontend-dir: \"${FRONTEND_DIR}\""
+      fi
+      generate_common_domain_inputs "$env_name" "$domain"
+      if [[ "$AUTH_METHOD" == *"Workload"* ]]; then
+        echo "      workload-identity-provider: ${GCP_WIF_PROVIDER:-projects/PROJECT_NUM/locations/global/workloadIdentityPools/github-actions/providers/github}"
+        echo "      service-account: ${GCP_SERVICE_ACCOUNT:-github-actions-deploy@${GCP_PROJECT_ID}.iam.gserviceaccount.com}"
+      fi
+      echo "    secrets:"
+      if [[ "$AUTH_METHOD" != *"Workload"* ]]; then
+        echo "      GCP_SA_KEY: \${{ secrets.GCP_SA_KEY }}"
+      fi
+      generate_common_secrets "$env_name"
+      ;;
+
+    *"Azure"*)
+      cat <<JOB
+  deploy-${env_name}:
+    needs: [${needs}]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/${branch}'
+    uses: ${TEMPLATES_REPO}/.github/workflows/deploy-azure.yml@${TEMPLATES_REF}
+    with:
+      environment: ${env_name}
+      azure-subscription-id: ${AZURE_SUBSCRIPTION_ID}
+      resource-group: ${AZURE_RESOURCE_GROUP}
+      location: ${AZURE_LOCATION}
+      terraform-state-key: ${state_key}
+      app-name: ${APP_NAME}
+JOB
+      if [[ "$PROJECT_TYPE" == *"frontend-only"* ]]; then
+        echo "      backend-type: none"
+        echo "      frontend-dir: \"${FRONTEND_DIR}\""
+      elif [[ "$PROJECT_TYPE" == *"backend-only"* ]]; then
+        echo "      backend-dir: \"${BACKEND_DIR}\""
+      else
+        echo "      backend-dir: \"${BACKEND_DIR}\""
+        echo "      frontend-dir: \"${FRONTEND_DIR}\""
+      fi
+      generate_common_domain_inputs "$env_name" "$domain"
+      if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
+        echo "      azure-tenant-id: ${AZURE_TENANT_ID:-TENANT_ID}"
+        echo "      azure-client-id: ${AZURE_CLIENT_ID:-CLIENT_ID}"
+      fi
+      echo "    secrets:"
+      if [[ "$AUTH_METHOD" != *"OIDC"* ]]; then
+        echo "      AZURE_CREDENTIALS: \${{ secrets.AZURE_CREDENTIALS }}"
+      fi
+      generate_common_secrets "$env_name"
+      ;;
+  esac
   echo ""
 }
 
@@ -493,17 +614,45 @@ echo -e "${BOLD}GitHub Secrets to configure:${NC}"
 echo -e "  ${DIM}(Settings > Secrets and variables > Actions)${NC}"
 echo ""
 
-if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
-  echo -e "  ${YELLOW}AWS (OIDC):${NC}"
-  if [ -z "$AWS_ROLE_ARN" ]; then
-    echo -e "    Update ${CYAN}aws-role-arn${NC} in ci.yml after creating the IAM role"
-    echo -e "    ${DIM}Use the Terraform module: infra/oidc/ in ci-templates${NC}"
-  fi
-else
-  echo -e "  ${YELLOW}AWS:${NC}"
-  echo "    AWS_ACCESS_KEY_ID"
-  echo "    AWS_SECRET_ACCESS_KEY"
-fi
+case "$CLOUD_PROVIDER" in
+  *"AWS"*)
+    if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
+      echo -e "  ${YELLOW}AWS (OIDC):${NC}"
+      if [ -z "$AWS_ROLE_ARN" ]; then
+        echo -e "    Update ${CYAN}aws-role-arn${NC} in ci.yml after creating the IAM role"
+        echo -e "    ${DIM}Use the Terraform module: terraform/oidc/ in ci-templates${NC}"
+      fi
+    else
+      echo -e "  ${YELLOW}AWS:${NC}"
+      echo "    AWS_ACCESS_KEY_ID"
+      echo "    AWS_SECRET_ACCESS_KEY"
+    fi
+    ;;
+  *"GCP"*)
+    if [[ "$AUTH_METHOD" == *"Workload"* ]]; then
+      echo -e "  ${YELLOW}GCP (Workload Identity):${NC}"
+      if [ -z "$GCP_WIF_PROVIDER" ]; then
+        echo -e "    Update ${CYAN}workload-identity-provider${NC} and ${CYAN}service-account${NC} in ci.yml"
+        echo -e "    ${DIM}Use the Terraform module: terraform/oidc-gcp/ in ci-templates${NC}"
+      fi
+    else
+      echo -e "  ${YELLOW}GCP:${NC}"
+      echo "    GCP_SA_KEY (service account key JSON)"
+    fi
+    ;;
+  *"Azure"*)
+    if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
+      echo -e "  ${YELLOW}Azure (Federated Credentials):${NC}"
+      if [ -z "$AZURE_CLIENT_ID" ]; then
+        echo -e "    Update ${CYAN}azure-tenant-id${NC} and ${CYAN}azure-client-id${NC} in ci.yml"
+        echo -e "    ${DIM}Use the Terraform module: terraform/oidc-azure/ in ci-templates${NC}"
+      fi
+    else
+      echo -e "  ${YELLOW}Azure:${NC}"
+      echo "    AZURE_CREDENTIALS (service principal JSON)"
+    fi
+    ;;
+esac
 
 if [[ "$PROJECT_TYPE" != *"docker"* ]]; then
   echo ""
@@ -532,13 +681,27 @@ if [ "$ENABLE_I18N" = true ]; then
 fi
 
 # OIDC setup instructions
-if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
+REPO_SLUG=$(git remote get-url origin 2>/dev/null | sed 's/.*github.com[:/]//' | sed 's/.git$//' || echo "your-org/your-repo")
+if [[ "$AUTH_METHOD" == *"OIDC"* ]] || [[ "$AUTH_METHOD" == *"Workload"* ]]; then
   echo ""
-  echo -e "${BOLD}OIDC Setup:${NC}"
-  echo -e "  1. Apply the Terraform module from ci-templates:"
-  echo -e "     ${DIM}cd infra && terraform apply -var=\"github_repo=$(git remote get-url origin 2>/dev/null | sed 's/.*github.com[:/]//' | sed 's/.git$//')\"${NC}"
-  echo -e "  2. Copy the output role ARN into your ci.yml"
-  echo -e "  3. No AWS access keys needed!"
+  echo -e "${BOLD}OIDC Setup (one-time):${NC}"
+  case "$CLOUD_PROVIDER" in
+    *"AWS"*)
+      echo -e "  1. ${DIM}cd ci-templates/terraform/oidc${NC}"
+      echo -e "  2. ${DIM}terraform init && terraform apply -var='github_repos=[\"${REPO_SLUG}\"]'${NC}"
+      echo -e "  3. Copy the output ${CYAN}role_arn${NC} into your ci.yml"
+      ;;
+    *"GCP"*)
+      echo -e "  1. ${DIM}cd ci-templates/terraform/oidc-gcp${NC}"
+      echo -e "  2. ${DIM}terraform init && terraform apply -var='gcp_project_id=${GCP_PROJECT_ID}' -var='github_repos=[\"${REPO_SLUG}\"]'${NC}"
+      echo -e "  3. Copy outputs ${CYAN}workload_identity_provider${NC} and ${CYAN}service_account_email${NC} into your ci.yml"
+      ;;
+    *"Azure"*)
+      echo -e "  1. ${DIM}cd ci-templates/terraform/oidc-azure${NC}"
+      echo -e "  2. ${DIM}terraform init && terraform apply -var='github_repos=[\"${REPO_SLUG}\"]'${NC}"
+      echo -e "  3. Copy outputs ${CYAN}client_id${NC} and ${CYAN}tenant_id${NC} into your ci.yml"
+      ;;
+  esac
 fi
 
 echo ""

@@ -1,0 +1,169 @@
+name: Rollback Azure
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: "Deployment environment (staging or prod)"
+      azure-subscription-id:
+        required: true
+        type: string
+        description: "Azure subscription ID"
+      azure-tenant-id:
+        type: string
+        default: ""
+        description: "Azure tenant ID (required for OIDC)"
+      azure-client-id:
+        type: string
+        default: ""
+        description: "Azure client/app ID for OIDC"
+      resource-group:
+        required: true
+        type: string
+        description: "Azure resource group"
+      function-app-name:
+        type: string
+        default: ""
+        description: "Azure Function App name to rollback"
+      rollback-deployment-id:
+        type: string
+        default: ""
+        description: "Specific deployment ID to rollback to (empty = previous deployment)"
+      cdn-profile:
+        type: string
+        default: ""
+        description: "CDN profile name for cache purge"
+      cdn-endpoint:
+        type: string
+        default: ""
+        description: "CDN endpoint name for cache purge"
+      app-name:
+        required: true
+        type: string
+        description: "Application name for notifications"
+    secrets:
+      AZURE_CREDENTIALS:
+        required: false
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-azure-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  rollback-functions:
+    name: Rollback Azure Functions (${{ inputs.environment }})
+    if: inputs.function-app-name != ''
+    runs-on: ubuntu-latest
+    outputs:
+      rolled-back-to: ${{ steps.rollback.outputs.deployment }}
+    steps:
+      - name: Azure Login (OIDC)
+        if: inputs.azure-client-id != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+
+      - name: Azure Login (Credentials)
+        if: inputs.azure-client-id == ''
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Rollback Function App
+        id: rollback
+        run: |
+          APP="${{ inputs.function-app-name }}"
+          RG="${{ inputs.resource-group }}"
+
+          if [ -n "${{ inputs.rollback-deployment-id }}" ]; then
+            TARGET="${{ inputs.rollback-deployment-id }}"
+          else
+            # Get the second-most-recent deployment
+            TARGET=$(az functionapp deployment list \
+              --name "$APP" \
+              --resource-group "$RG" \
+              --query "[1].id" -o tsv 2>/dev/null || echo "")
+          fi
+
+          if [ -z "$TARGET" ]; then
+            echo "No previous deployment found. Attempting restart as fallback."
+            az functionapp restart --name "$APP" --resource-group "$RG"
+            echo "deployment=restart" >> "$GITHUB_OUTPUT"
+          else
+            echo "Rolling back $APP to deployment $TARGET"
+            echo "deployment=$TARGET" >> "$GITHUB_OUTPUT"
+            az functionapp deployment source config-zip \
+              --name "$APP" \
+              --resource-group "$RG" \
+              --src "$TARGET" 2>/dev/null || \
+            az functionapp restart --name "$APP" --resource-group "$RG"
+          fi
+
+  purge-cdn:
+    name: Purge CDN
+    if: inputs.cdn-profile != '' && inputs.cdn-endpoint != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure Login (OIDC)
+        if: inputs.azure-client-id != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+
+      - name: Azure Login (Credentials)
+        if: inputs.azure-client-id == ''
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Purge CDN
+        run: |
+          az cdn endpoint purge \
+            --resource-group "${{ inputs.resource-group }}" \
+            --profile-name "${{ inputs.cdn-profile }}" \
+            --name "${{ inputs.cdn-endpoint }}" \
+            --content-paths "/*" || true
+
+  notify:
+    name: Notify
+    needs: [rollback-functions, purge-cdn]
+    if: always() && secrets.TELEGRAM_BOT_TOKEN != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Telegram notification
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            ICON="❌"
+            TEXT="rollback failed"
+          else
+            ICON="🔄"
+            TEXT="rolled back successfully"
+          fi
+
+          DETAILS=""
+          if [ -n "${{ needs.rollback-functions.outputs.rolled-back-to }}" ]; then
+            DETAILS="%0A↩️ Deployment: ${{ needs.rollback-functions.outputs.rolled-back-to }}"
+          fi
+
+          MESSAGE="${ICON} <b>${{ inputs.app-name }}</b> (${{ inputs.environment }}) ${TEXT} [Azure]${DETAILS}%0A%0A📦 ${GITHUB_SHA::7} by ${GITHUB_ACTOR}"
+
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" || true

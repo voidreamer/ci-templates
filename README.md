@@ -1,8 +1,14 @@
 # Void CI Templates
 
-Reusable GitHub Actions workflows for full-stack AWS serverless projects. Extracts common CI/CD patterns into callable workflows so you can build a complete pipeline in a few lines.
+Reusable GitHub Actions workflows for full-stack serverless projects. Extracts common CI/CD patterns into callable workflows so you can build a complete pipeline in a few lines.
 
-Designed for projects with a Python backend (Lambda), a Node.js frontend (S3 + CloudFront), and Terraform infrastructure, but each workflow can be used independently.
+Supports **AWS**, **GCP**, and **Azure** with the same workflow patterns. Designed for projects with a Python backend, a Node.js frontend, and Terraform infrastructure, but each workflow can be used independently.
+
+| Cloud | Backend | Frontend | CDN | Auth |
+|-------|---------|----------|-----|------|
+| AWS | Lambda | S3 | CloudFront | OIDC / Static Keys |
+| GCP | Cloud Run | Cloud Storage | Cloud CDN | Workload Identity / SA Key |
+| Azure | Functions | Blob Storage | Azure CDN | Federated Credentials / SP |
 
 ## Quick Start
 
@@ -16,13 +22,15 @@ bash <(curl -sL https://raw.githubusercontent.com/voidreamer/ci-templates/main/i
 
 This will ask you about your project type, preferences, and generate a ready-to-use CI/CD pipeline with dependabot config.
 
-### Option B: OIDC Setup (one-time per AWS account)
+### Option B: OIDC Setup (one-time per cloud account)
 
 ```bash
-cd terraform/oidc
+# AWS:   cd terraform/oidc
+# GCP:   cd terraform/oidc-gcp
+# Azure: cd terraform/oidc-azure
 terraform init
 terraform apply -var='github_repos=["your-org/your-repo"]'
-# Copy the output role_arn into your CI workflow
+# Copy the outputs into your CI workflow
 ```
 
 ### Option C: Manual Setup
@@ -63,7 +71,11 @@ jobs:
 | Workflow | Description | Key Inputs |
 |----------|-------------|------------|
 | `deploy-aws.yml` | Full AWS deploy: Terraform + Lambda + S3 + CloudFront | `environment`, `terraform-state-key`, `app-name` |
+| `deploy-gcp.yml` | Full GCP deploy: Terraform + Cloud Run + GCS + CDN | `environment`, `gcp-project-id`, `app-name` |
+| `deploy-azure.yml` | Full Azure deploy: Terraform + Functions + Blob + CDN | `environment`, `azure-subscription-id`, `app-name` |
 | `rollback-aws.yml` | Rollback Lambda to previous version + CloudFront invalidation | `lambda-function`, `environment`, `app-name` |
+| `rollback-gcp.yml` | Rollback Cloud Run to previous revision + CDN invalidation | `cloud-run-service`, `environment`, `app-name` |
+| `rollback-azure.yml` | Rollback Azure Functions + CDN purge | `function-app-name`, `environment`, `app-name` |
 | `test-python.yml` | Python backend tests with optional PostgreSQL + pip-audit | `python-version`, `postgres`, `test-command` |
 | `test-node.yml` | Node.js frontend tests, lint, build + npm audit | `node-version`, `test-command`, `build` |
 | `docker-build.yml` | Build & push Docker images to GHCR | `image-name`, `push`, `tag-strategy` |
@@ -110,6 +122,39 @@ Optional secrets:
 - `VITE_ENV_VARS`: newline-separated `VITE_xxx=value` pairs for frontend build
 - `DATABASE_URL`: for Alembic migrations
 - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`: for notifications
+
+### deploy-gcp.yml
+
+Full deployment pipeline for GCP. Runs Terraform, deploys backend to Cloud Run, frontend to Cloud Storage, invalidates CDN, and sends notifications.
+
+```yaml
+uses: voidreamer/ci-templates/.github/workflows/deploy-gcp.yml@main
+with:
+  environment: production
+  gcp-project-id: my-project-123
+  gcp-region: us-central1
+  terraform-state-bucket: my-tf-state-bucket
+  terraform-state-prefix: prod/terraform
+  app-name: MyApp
+  workload-identity-provider: projects/123/locations/global/workloadIdentityPools/github-actions/providers/github
+  service-account: github-actions-deploy@my-project-123.iam.gserviceaccount.com
+```
+
+### deploy-azure.yml
+
+Full deployment pipeline for Azure. Runs Terraform, deploys backend to Azure Functions, frontend to Blob Storage static site, purges CDN, and sends notifications.
+
+```yaml
+uses: voidreamer/ci-templates/.github/workflows/deploy-azure.yml@main
+with:
+  environment: production
+  azure-subscription-id: 00000000-0000-0000-0000-000000000000
+  azure-tenant-id: 00000000-0000-0000-0000-000000000000
+  azure-client-id: 00000000-0000-0000-0000-000000000000
+  resource-group: my-app-rg
+  terraform-state-key: prod/terraform.tfstate
+  app-name: MyApp
+```
 
 ### rollback-aws.yml
 
@@ -239,20 +284,31 @@ Complete example pipelines are available in the `examples/` directory:
 
 ## OIDC Authentication (Recommended)
 
-Instead of storing static AWS keys as GitHub secrets, use OIDC federation for keyless authentication:
+All three clouds support keyless authentication from GitHub Actions. Terraform modules are provided for each:
 
-1. Apply the Terraform module (one-time per AWS account):
-   ```bash
-   cd terraform/oidc
-   terraform init
-   terraform apply -var='github_repos=["your-org/your-repo"]'
-   ```
-2. Use the output `role_arn` in your workflow:
-   ```yaml
-   with:
-     aws-role-arn: arn:aws:iam::123456789012:role/github-actions-deploy
-   ```
-3. No `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` needed.
+### AWS
+
+```bash
+cd terraform/oidc
+terraform init && terraform apply -var='github_repos=["your-org/your-repo"]'
+# Use output: aws-role-arn
+```
+
+### GCP
+
+```bash
+cd terraform/oidc-gcp
+terraform init && terraform apply -var='gcp_project_id=my-project' -var='github_repos=["your-org/your-repo"]'
+# Use outputs: workload-identity-provider, service-account
+```
+
+### Azure
+
+```bash
+cd terraform/oidc-azure
+terraform init && terraform apply -var='github_repos=["your-org/your-repo"]'
+# Use outputs: azure-client-id, azure-tenant-id
+```
 
 ## Dependabot
 

@@ -1,0 +1,403 @@
+name: Deploy to Azure
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: "Deployment environment (staging or prod)"
+      azure-subscription-id:
+        required: true
+        type: string
+        description: "Azure subscription ID"
+      azure-tenant-id:
+        type: string
+        default: ""
+        description: "Azure tenant ID (required for OIDC)"
+      azure-client-id:
+        type: string
+        default: ""
+        description: "Azure client/app ID for OIDC (Federated Credentials)"
+      resource-group:
+        required: true
+        type: string
+        description: "Azure resource group name"
+      location:
+        type: string
+        default: "canadacentral"
+        description: "Azure region"
+      python-version:
+        type: string
+        default: "3.11"
+        description: "Python version for backend"
+      node-version:
+        type: string
+        default: "22"
+        description: "Node.js version for frontend"
+      terraform-version:
+        type: string
+        default: "1.6.0"
+        description: "Terraform version"
+      infra-dir:
+        type: string
+        default: "infra"
+        description: "Terraform directory"
+      backend-dir:
+        type: string
+        default: "backend"
+        description: "Backend directory"
+      frontend-dir:
+        type: string
+        default: "frontend"
+        description: "Frontend directory"
+      terraform-state-resource-group:
+        type: string
+        default: ""
+        description: "Resource group for Terraform state storage account"
+      terraform-state-storage-account:
+        type: string
+        default: ""
+        description: "Storage account for Terraform state"
+      terraform-state-container:
+        type: string
+        default: "tfstate"
+        description: "Container name for Terraform state"
+      terraform-state-key:
+        required: true
+        type: string
+        description: "Blob key for Terraform state"
+      app-name:
+        required: true
+        type: string
+        description: "Application name for notifications"
+      backend-type:
+        type: string
+        default: "functions"
+        description: "Backend type: functions or none"
+      function-app-name:
+        type: string
+        default: ""
+        description: "Azure Function App name (auto-detected from Terraform if empty)"
+      storage-account:
+        type: string
+        default: ""
+        description: "Storage account for frontend static site (auto-detected from Terraform if empty)"
+      cdn-profile:
+        type: string
+        default: ""
+        description: "CDN profile name for cache purge"
+      cdn-endpoint:
+        type: string
+        default: ""
+        description: "CDN endpoint name for cache purge"
+      custom-domain:
+        type: string
+        default: ""
+        description: "Custom domain for the app"
+      health-check-url:
+        type: string
+        default: ""
+        description: "URL to check after deploy"
+      run-migrations:
+        type: boolean
+        default: true
+        description: "Run database migrations"
+      migration-tool:
+        type: string
+        default: "alembic"
+        description: "Migration tool: alembic or none"
+    secrets:
+      AZURE_CREDENTIALS:
+        required: false
+        description: "Azure credentials JSON (legacy, prefer OIDC with azure-client-id)"
+      TERRAFORM_VARS:
+        required: false
+      VITE_ENV_VARS:
+        required: false
+      DATABASE_URL:
+        required: false
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-azure-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    name: Terraform (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    outputs:
+      function-app-name: ${{ steps.outputs.outputs.function_app_name }}
+      storage-account: ${{ steps.outputs.outputs.storage_account }}
+      cdn-profile: ${{ steps.outputs.outputs.cdn_profile }}
+      cdn-endpoint: ${{ steps.outputs.outputs.cdn_endpoint }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        if: inputs.azure-client-id != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+
+      - name: Azure Login (Credentials)
+        if: inputs.azure-client-id == ''
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Cache Terraform providers
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.infra-dir }}/.terraform/providers
+          key: terraform-azure-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', inputs.infra-dir)) }}
+          restore-keys: |
+            terraform-azure-${{ inputs.terraform-version }}-
+
+      - name: Export Terraform variables
+        if: secrets.TERRAFORM_VARS != ''
+        run: |
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              export "$line"
+            fi
+          done <<< "${{ secrets.TERRAFORM_VARS }}"
+          env | grep ^TF_VAR_ >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        working-directory: ${{ inputs.infra-dir }}
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ inputs.terraform-state-resource-group || inputs.resource-group }}" \
+            -backend-config="storage_account_name=${{ inputs.terraform-state-storage-account }}" \
+            -backend-config="container_name=${{ inputs.terraform-state-container }}" \
+            -backend-config="key=${{ inputs.terraform-state-key }}"
+
+      - name: Terraform plan
+        working-directory: ${{ inputs.infra-dir }}
+        run: terraform plan -out=tfplan -input=false
+
+      - name: Terraform apply
+        working-directory: ${{ inputs.infra-dir }}
+        run: terraform apply -auto-approve -input=false tfplan
+
+      - name: Extract outputs
+        id: outputs
+        working-directory: ${{ inputs.infra-dir }}
+        run: |
+          echo "function_app_name=$(terraform output -raw function_app_name 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+          echo "storage_account=$(terraform output -raw storage_account_name 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+          echo "cdn_profile=$(terraform output -raw cdn_profile_name 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+          echo "cdn_endpoint=$(terraform output -raw cdn_endpoint_name 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+
+  backend:
+    name: Deploy backend
+    needs: terraform
+    if: inputs.backend-type == 'functions'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Azure Login (OIDC)
+        if: inputs.azure-client-id != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+
+      - name: Azure Login (Credentials)
+        if: inputs.azure-client-id == ''
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Run migrations
+        if: inputs.run-migrations && inputs.migration-tool == 'alembic'
+        working-directory: ${{ inputs.backend-dir }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          pip install -r requirements.txt
+          python -m alembic upgrade head
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.backend-dir }}
+        run: |
+          pip install -r requirements.txt --target=".python_packages/lib/site-packages"
+
+      - name: Deploy to Azure Functions
+        uses: azure/functions-action@v2
+        with:
+          app-name: ${{ inputs.function-app-name || needs.terraform.outputs.function-app-name }}
+          package: ${{ inputs.backend-dir }}
+          scm-do-build-during-deployment: false
+
+  frontend:
+    name: Deploy frontend
+    needs: terraform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.frontend-dir }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.frontend-dir }}
+        run: npm ci
+
+      - name: Export VITE environment variables
+        if: secrets.VITE_ENV_VARS != ''
+        run: |
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              echo "$line" >> "$GITHUB_ENV"
+            fi
+          done <<< "${{ secrets.VITE_ENV_VARS }}"
+
+      - name: Build
+        working-directory: ${{ inputs.frontend-dir }}
+        run: npm run build
+
+      - name: Azure Login (OIDC)
+        if: inputs.azure-client-id != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+
+      - name: Azure Login (Credentials)
+        if: inputs.azure-client-id == ''
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Azure Blob Storage
+        working-directory: ${{ inputs.frontend-dir }}
+        run: |
+          ACCOUNT="${{ inputs.storage-account || needs.terraform.outputs.storage-account }}"
+          az storage blob upload-batch \
+            --account-name "$ACCOUNT" \
+            --destination '$web' \
+            --source dist/ \
+            --overwrite \
+            --content-cache-control "public, max-age=31536000, immutable" \
+            --pattern "*" \
+            --exclude-pattern "index.html;*.json"
+          az storage blob upload \
+            --account-name "$ACCOUNT" \
+            --container-name '$web' \
+            --file dist/index.html \
+            --name index.html \
+            --overwrite \
+            --content-cache-control "no-cache, no-store, must-revalidate"
+          az storage blob upload-batch \
+            --account-name "$ACCOUNT" \
+            --destination '$web' \
+            --source dist/ \
+            --overwrite \
+            --content-cache-control "no-cache" \
+            --pattern "*.json"
+
+      - name: Purge CDN
+        if: (needs.terraform.outputs.cdn-profile != '' && needs.terraform.outputs.cdn-endpoint != '') || (inputs.cdn-profile != '' && inputs.cdn-endpoint != '')
+        run: |
+          az cdn endpoint purge \
+            --resource-group "${{ inputs.resource-group }}" \
+            --profile-name "${{ inputs.cdn-profile || needs.terraform.outputs.cdn-profile }}" \
+            --name "${{ inputs.cdn-endpoint || needs.terraform.outputs.cdn-endpoint }}" \
+            --content-paths "/*" || true
+
+  health-check:
+    name: Health check
+    needs: [terraform, backend, frontend]
+    if: always() && inputs.health-check-url != '' && !contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Wait for deployment propagation
+        run: sleep 30
+
+      - name: Check health
+        run: |
+          for i in 1 2 3 4 5; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.health-check-url }}" || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "Health check passed (HTTP $status)"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $status, retrying in 10s..."
+            sleep 10
+          done
+          echo "Health check failed after 5 attempts"
+          exit 1
+
+  notify:
+    name: Notify
+    needs: [terraform, backend, frontend, health-check]
+    if: always() && secrets.TELEGRAM_BOT_TOKEN != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send Telegram notification
+        run: |
+          if [ "${{ steps.status.outputs.result }}" = "success" ]; then
+            ICON="✅"
+            TEXT="deployed successfully"
+          else
+            ICON="❌"
+            TEXT="deploy failed"
+          fi
+
+          DOMAIN="${{ inputs.custom-domain }}"
+          URL_LINE=""
+          if [ -n "$DOMAIN" ]; then
+            URL_LINE="%0A🔗 https://${DOMAIN}"
+          fi
+
+          MESSAGE="${ICON} <b>${{ inputs.app-name }}</b> (${{ inputs.environment }}) ${TEXT} [Azure]${URL_LINE}%0A%0A📦 ${GITHUB_SHA::7} by ${GITHUB_ACTOR}"
+
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" || true

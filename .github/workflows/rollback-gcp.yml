@@ -1,0 +1,170 @@
+name: Rollback GCP
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: "Deployment environment (staging or prod)"
+      gcp-project-id:
+        required: true
+        type: string
+        description: "GCP project ID"
+      gcp-region:
+        type: string
+        default: "us-central1"
+        description: "GCP region"
+      workload-identity-provider:
+        type: string
+        default: ""
+        description: "Workload Identity Provider for OIDC"
+      service-account:
+        type: string
+        default: ""
+        description: "GCP service account email"
+      cloud-run-service:
+        type: string
+        default: ""
+        description: "Cloud Run service name to rollback"
+      rollback-revision:
+        type: string
+        default: ""
+        description: "Specific revision to rollback to (empty = previous revision)"
+      cdn-url-map:
+        type: string
+        default: ""
+        description: "URL map name for CDN cache invalidation"
+      app-name:
+        required: true
+        type: string
+        description: "Application name for notifications"
+    secrets:
+      GCP_SA_KEY:
+        required: false
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-gcp-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  rollback-cloud-run:
+    name: Rollback Cloud Run (${{ inputs.environment }})
+    if: inputs.cloud-run-service != ''
+    runs-on: ubuntu-latest
+    outputs:
+      rolled-back-to: ${{ steps.rollback.outputs.revision }}
+    steps:
+      - name: Authenticate to GCP (Workload Identity)
+        if: inputs.workload-identity-provider != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.service-account }}
+
+      - name: Authenticate to GCP (SA Key)
+        if: inputs.workload-identity-provider == ''
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Rollback Cloud Run
+        id: rollback
+        run: |
+          SERVICE="${{ inputs.cloud-run-service }}"
+          REGION="${{ inputs.gcp-region }}"
+          PROJECT="${{ inputs.gcp-project-id }}"
+
+          if [ -n "${{ inputs.rollback-revision }}" ]; then
+            TARGET="${{ inputs.rollback-revision }}"
+          else
+            # Get the second-most-recent revision (the one before current)
+            TARGET=$(gcloud run revisions list \
+              --service="$SERVICE" \
+              --region="$REGION" \
+              --project="$PROJECT" \
+              --format="value(REVISION)" \
+              --sort-by="~creationTimestamp" \
+              --limit=2 | tail -1)
+          fi
+
+          if [ -z "$TARGET" ]; then
+            echo "No previous revision found to rollback to"
+            exit 1
+          fi
+
+          echo "Rolling back $SERVICE to revision $TARGET"
+          echo "revision=$TARGET" >> "$GITHUB_OUTPUT"
+
+          gcloud run services update-traffic "$SERVICE" \
+            --to-revisions="$TARGET=100" \
+            --region="$REGION" \
+            --project="$PROJECT"
+
+  invalidate-cdn:
+    name: Invalidate CDN
+    if: inputs.cdn-url-map != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authenticate to GCP (Workload Identity)
+        if: inputs.workload-identity-provider != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.service-account }}
+
+      - name: Authenticate to GCP (SA Key)
+        if: inputs.workload-identity-provider == ''
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Invalidate CDN cache
+        run: |
+          gcloud compute url-maps invalidate-cdn-cache "${{ inputs.cdn-url-map }}" \
+            --path "/*" \
+            --project "${{ inputs.gcp-project-id }}" || true
+
+  notify:
+    name: Notify
+    needs: [rollback-cloud-run, invalidate-cdn]
+    if: always() && secrets.TELEGRAM_BOT_TOKEN != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Telegram notification
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            ICON="❌"
+            TEXT="rollback failed"
+          else
+            ICON="🔄"
+            TEXT="rolled back successfully"
+          fi
+
+          DETAILS=""
+          if [ -n "${{ needs.rollback-cloud-run.outputs.rolled-back-to }}" ]; then
+            DETAILS="%0A↩️ Revision: ${{ needs.rollback-cloud-run.outputs.rolled-back-to }}"
+          fi
+
+          MESSAGE="${ICON} <b>${{ inputs.app-name }}</b> (${{ inputs.environment }}) ${TEXT} [GCP]${DETAILS}%0A%0A📦 ${GITHUB_SHA::7} by ${GITHUB_ACTOR}"
+
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" || true

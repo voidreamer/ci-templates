@@ -1,0 +1,370 @@
+name: Deploy to GCP
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: "Deployment environment (staging or prod)"
+      gcp-project-id:
+        required: true
+        type: string
+        description: "GCP project ID"
+      gcp-region:
+        type: string
+        default: "us-central1"
+        description: "GCP region"
+      workload-identity-provider:
+        type: string
+        default: ""
+        description: "Workload Identity Provider (projects/PROJECT_NUM/locations/global/workloadIdentityPools/POOL/providers/PROVIDER)"
+      service-account:
+        type: string
+        default: ""
+        description: "GCP service account email for Workload Identity Federation"
+      python-version:
+        type: string
+        default: "3.11"
+        description: "Python version for backend"
+      node-version:
+        type: string
+        default: "22"
+        description: "Node.js version for frontend"
+      terraform-version:
+        type: string
+        default: "1.6.0"
+        description: "Terraform version"
+      infra-dir:
+        type: string
+        default: "infra"
+        description: "Terraform directory"
+      backend-dir:
+        type: string
+        default: "backend"
+        description: "Backend directory"
+      frontend-dir:
+        type: string
+        default: "frontend"
+        description: "Frontend directory"
+      terraform-state-bucket:
+        required: true
+        type: string
+        description: "GCS bucket for Terraform state"
+      terraform-state-prefix:
+        required: true
+        type: string
+        description: "Prefix for Terraform state (e.g. staging/terraform)"
+      app-name:
+        required: true
+        type: string
+        description: "Application name for notifications"
+      backend-type:
+        type: string
+        default: "cloud-run"
+        description: "Backend type: cloud-run or none"
+      cloud-run-service:
+        type: string
+        default: ""
+        description: "Cloud Run service name (auto-detected from Terraform if empty)"
+      gcs-bucket:
+        type: string
+        default: ""
+        description: "GCS bucket for frontend (auto-detected from Terraform if empty)"
+      cdn-url-map:
+        type: string
+        default: ""
+        description: "URL map name for CDN cache invalidation"
+      custom-domain:
+        type: string
+        default: ""
+        description: "Custom domain for the app"
+      health-check-url:
+        type: string
+        default: ""
+        description: "URL to check after deploy"
+      run-migrations:
+        type: boolean
+        default: true
+        description: "Run database migrations"
+      migration-tool:
+        type: string
+        default: "alembic"
+        description: "Migration tool: alembic or none"
+    secrets:
+      GCP_SA_KEY:
+        required: false
+        description: "Service account key JSON (legacy, prefer Workload Identity)"
+      TERRAFORM_VARS:
+        required: false
+      VITE_ENV_VARS:
+        required: false
+      DATABASE_URL:
+        required: false
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-gcp-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    name: Terraform (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    outputs:
+      cloud-run-service: ${{ steps.outputs.outputs.cloud_run_service }}
+      cloud-run-url: ${{ steps.outputs.outputs.cloud_run_url }}
+      gcs-bucket: ${{ steps.outputs.outputs.gcs_bucket }}
+      cdn-url-map: ${{ steps.outputs.outputs.cdn_url_map }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (Workload Identity)
+        if: inputs.workload-identity-provider != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.service-account }}
+
+      - name: Authenticate to GCP (SA Key)
+        if: inputs.workload-identity-provider == ''
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Cache Terraform providers
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.infra-dir }}/.terraform/providers
+          key: terraform-gcp-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', inputs.infra-dir)) }}
+          restore-keys: |
+            terraform-gcp-${{ inputs.terraform-version }}-
+
+      - name: Export Terraform variables
+        if: secrets.TERRAFORM_VARS != ''
+        run: |
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              export "$line"
+            fi
+          done <<< "${{ secrets.TERRAFORM_VARS }}"
+          env | grep ^TF_VAR_ >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        working-directory: ${{ inputs.infra-dir }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ inputs.terraform-state-bucket }}" \
+            -backend-config="prefix=${{ inputs.terraform-state-prefix }}"
+
+      - name: Terraform plan
+        working-directory: ${{ inputs.infra-dir }}
+        run: terraform plan -out=tfplan -input=false
+
+      - name: Terraform apply
+        working-directory: ${{ inputs.infra-dir }}
+        run: terraform apply -auto-approve -input=false tfplan
+
+      - name: Extract outputs
+        id: outputs
+        working-directory: ${{ inputs.infra-dir }}
+        run: |
+          echo "cloud_run_service=$(terraform output -raw cloud_run_service_name 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+          echo "cloud_run_url=$(terraform output -raw cloud_run_url 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+          echo "gcs_bucket=$(terraform output -raw gcs_bucket_name 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+          echo "cdn_url_map=$(terraform output -raw cdn_url_map_name 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+
+  backend:
+    name: Deploy backend
+    needs: terraform
+    if: inputs.backend-type == 'cloud-run'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (Workload Identity)
+        if: inputs.workload-identity-provider != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.service-account }}
+
+      - name: Authenticate to GCP (SA Key)
+        if: inputs.workload-identity-provider == ''
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Run migrations
+        if: inputs.run-migrations && inputs.migration-tool == 'alembic'
+        working-directory: ${{ inputs.backend-dir }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          pip install -r requirements.txt
+          python -m alembic upgrade head
+
+      - name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ inputs.cloud-run-service || needs.terraform.outputs.cloud-run-service }}
+          source: ${{ inputs.backend-dir }}
+          region: ${{ inputs.gcp-region }}
+
+  frontend:
+    name: Deploy frontend
+    needs: terraform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.frontend-dir }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.frontend-dir }}
+        run: npm ci
+
+      - name: Export VITE environment variables
+        if: secrets.VITE_ENV_VARS != ''
+        run: |
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              echo "$line" >> "$GITHUB_ENV"
+            fi
+          done <<< "${{ secrets.VITE_ENV_VARS }}"
+
+      - name: Build
+        working-directory: ${{ inputs.frontend-dir }}
+        run: npm run build
+
+      - name: Authenticate to GCP (Workload Identity)
+        if: inputs.workload-identity-provider != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.service-account }}
+
+      - name: Authenticate to GCP (SA Key)
+        if: inputs.workload-identity-provider == ''
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to GCS
+        working-directory: ${{ inputs.frontend-dir }}
+        run: |
+          BUCKET="${{ inputs.gcs-bucket || needs.terraform.outputs.gcs-bucket }}"
+          gsutil -m rsync -r -d \
+            -h "Cache-Control:public, max-age=31536000, immutable" \
+            -x "index\.html$|.*\.json$" \
+            dist/ "gs://${BUCKET}"
+          gsutil -h "Cache-Control:no-cache, no-store, must-revalidate" \
+            cp dist/index.html "gs://${BUCKET}/index.html"
+          gsutil -m -h "Cache-Control:no-cache" \
+            rsync -r \
+            -i ".*\.json$" \
+            dist/ "gs://${BUCKET}"
+
+      - name: Invalidate CDN cache
+        if: needs.terraform.outputs.cdn-url-map != '' || inputs.cdn-url-map != ''
+        run: |
+          URL_MAP="${{ inputs.cdn-url-map || needs.terraform.outputs.cdn-url-map }}"
+          gcloud compute url-maps invalidate-cdn-cache "$URL_MAP" \
+            --path "/*" \
+            --project "${{ inputs.gcp-project-id }}" || true
+
+  health-check:
+    name: Health check
+    needs: [terraform, backend, frontend]
+    if: always() && inputs.health-check-url != '' && !contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Wait for deployment propagation
+        run: sleep 30
+
+      - name: Check health
+        run: |
+          for i in 1 2 3 4 5; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.health-check-url }}" || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "Health check passed (HTTP $status)"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $status, retrying in 10s..."
+            sleep 10
+          done
+          echo "Health check failed after 5 attempts"
+          exit 1
+
+  notify:
+    name: Notify
+    needs: [terraform, backend, frontend, health-check]
+    if: always() && secrets.TELEGRAM_BOT_TOKEN != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send Telegram notification
+        run: |
+          if [ "${{ steps.status.outputs.result }}" = "success" ]; then
+            ICON="✅"
+            TEXT="deployed successfully"
+          else
+            ICON="❌"
+            TEXT="deploy failed"
+          fi
+
+          DOMAIN="${{ inputs.custom-domain }}"
+          URL_LINE=""
+          if [ -n "$DOMAIN" ]; then
+            URL_LINE="%0A🔗 https://${DOMAIN}"
+          fi
+
+          MESSAGE="${ICON} <b>${{ inputs.app-name }}</b> (${{ inputs.environment }}) ${TEXT} [GCP]${URL_LINE}%0A%0A📦 ${GITHUB_SHA::7} by ${GITHUB_ACTOR}"
+
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" || true
