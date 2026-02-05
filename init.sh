@@ -173,6 +173,10 @@ ENABLE_LIGHTHOUSE=false
 ENABLE_MOBILE=false
 ENABLE_DOCKER=false
 ENABLE_I18N=false
+DOCKERFILE_PATH=""
+DOCKER_CONTEXT="."
+BACKEND_DIR="backend"
+FRONTEND_DIR="frontend"
 
 case "$PROJECT_TYPE" in
   *"full-stack"*)
