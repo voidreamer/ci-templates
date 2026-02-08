@@ -4,24 +4,22 @@
 # - Python backend (Lambda)
 # - Node.js frontend (S3 + CloudFront)
 # - Terraform infrastructure
-# - Staging and production environments
+# - Per-PR preview deployments (replaces staging branch)
+# - Production deployment on main
 # - Telegram notifications
 # - OIDC authentication (no static AWS keys)
 #
 # Copy this file to your project at .github/workflows/ci.yml
 # and adjust the values to match your setup.
-#
-# OIDC setup: Create an IAM role with trust policy for
-# GitHub OIDC provider and pass its ARN via aws-role-arn.
 
 name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
     tags: ["v*"]
   pull_request:
-    branches: [main, staging]
+    branches: [main]
 
 jobs:
   test-backend:
@@ -35,29 +33,30 @@ jobs:
     uses: voidreamer/ci-templates/.github/workflows/test-node.yml@main
 
   lighthouse:
+    if: github.event_name == 'pull_request'
     uses: voidreamer/ci-templates/.github/workflows/lighthouse.yml@main
 
-  deploy-staging:
-    needs: [test-backend, test-frontend]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
-    uses: voidreamer/ci-templates/.github/workflows/deploy-aws.yml@main
+  # ── Per-PR Preview Deployments ──
+  # Frontend-only previews that share the staging backend API.
+  # Requires: terraform/preview-aws module applied once, then
+  # set PREVIEW_CLOUDFRONT_ID secret from the terraform output.
+  preview:
+    if: github.event_name == 'pull_request'
+    uses: voidreamer/ci-templates/.github/workflows/preview-deploy.yml@main
     with:
-      environment: staging
-      terraform-state-key: staging/terraform.tfstate
-      custom-domain: staging-app.example.com
-      health-check-url: https://staging-app.example.com
-      app-name: MyApp
+      preview-domain: previews.example.com
+      preview-bucket: my-app-previews
+      frontend-dir: frontend
+      aws-region: us-east-1
       aws-role-arn: arn:aws:iam::123456789012:role/github-actions-deploy
     secrets:
-      TERRAFORM_VARS: |
-        TF_VAR_environment=staging
-        TF_VAR_database_url=${{ secrets.DATABASE_URL_STAGING }}
+      PREVIEW_CLOUDFRONT_ID: ${{ secrets.PREVIEW_CLOUDFRONT_ID }}
       VITE_ENV_VARS: |
         VITE_API_URL=${{ secrets.API_URL_STAGING }}
-      DATABASE_URL: ${{ secrets.DATABASE_URL_STAGING }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
+        VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}
 
+  # ── Production Deploy ──
   deploy-production:
     needs: [test-backend, test-frontend]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -79,9 +78,10 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
+  # ── Mobile Builds (release tags only) ──
   android:
     needs: [test-frontend]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/')
     uses: voidreamer/ci-templates/.github/workflows/android-build.yml@main
     with:
       app-id: com.example.myapp

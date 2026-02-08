@@ -2,6 +2,7 @@
 #
 # This shows a setup for a project with only a frontend:
 # - Node.js frontend (S3 + CloudFront)
+# - Per-PR preview deployments
 # - No backend deployment
 # - Lighthouse audits on PRs
 # - OIDC authentication (no static AWS keys)
@@ -13,9 +14,9 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
   pull_request:
-    branches: [main, staging]
+    branches: [main]
 
 jobs:
   test:
@@ -30,24 +31,19 @@ jobs:
     with:
       working-directory: "."
 
-  deploy-staging:
-    needs: [test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
-    uses: voidreamer/ci-templates/.github/workflows/deploy-aws.yml@main
+  # ── Per-PR Preview Deployments ──
+  preview:
+    if: github.event_name == 'pull_request'
+    uses: voidreamer/ci-templates/.github/workflows/preview-deploy.yml@main
     with:
-      environment: staging
-      terraform-state-key: staging/terraform.tfstate
-      custom-domain: staging.example.com
-      app-name: MySite
-      backend-type: none
-      run-migrations: false
+      preview-domain: previews.example.com
+      preview-bucket: my-site-previews
       frontend-dir: "."
       aws-role-arn: arn:aws:iam::123456789012:role/github-actions-deploy
     secrets:
+      PREVIEW_CLOUDFRONT_ID: ${{ secrets.PREVIEW_CLOUDFRONT_ID }}
       VITE_ENV_VARS: |
         VITE_API_URL=${{ secrets.API_URL_STAGING }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
   deploy-production:
     needs: [test]
