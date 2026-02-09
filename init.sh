@@ -173,6 +173,9 @@ ENABLE_LIGHTHOUSE=false
 ENABLE_MOBILE=false
 ENABLE_DOCKER=false
 ENABLE_I18N=false
+ENABLE_PREVIEWS=false
+PREVIEW_DOMAIN=""
+PREVIEW_BUCKET=""
 DOCKERFILE_PATH=""
 DOCKER_CONTEXT="."
 BACKEND_DIR="backend"
@@ -182,18 +185,30 @@ case "$PROJECT_TYPE" in
   *"full-stack"*)
     ask_yn "Enable PostgreSQL for backend tests?" "y" ENABLE_POSTGRES
     ask_yn "Enable Lighthouse performance audits?" "y" ENABLE_LIGHTHOUSE
+    ask_yn "Enable per-PR preview deployments?" "y" ENABLE_PREVIEWS
     ask_yn "Enable mobile builds (iOS/Android)?" "n" ENABLE_MOBILE
     ask_yn "Enable i18n translations (DeepL)?" "n" ENABLE_I18N
     BACKEND_DIR="backend"
     FRONTEND_DIR="frontend"
     ask "Backend directory" "$BACKEND_DIR" BACKEND_DIR
     ask "Frontend directory" "$FRONTEND_DIR" FRONTEND_DIR
+    if [ "$ENABLE_PREVIEWS" = true ]; then
+      ask "Preview domain (e.g. previews.example.com)" "" PREVIEW_DOMAIN
+      PREVIEW_BUCKET="${APP_NAME_LOWER:-$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')}-previews"
+      ask "Preview S3 bucket name" "$PREVIEW_BUCKET" PREVIEW_BUCKET
+    fi
     ;;
   *"frontend-only"*)
     ask_yn "Enable Lighthouse performance audits?" "y" ENABLE_LIGHTHOUSE
+    ask_yn "Enable per-PR preview deployments?" "y" ENABLE_PREVIEWS
     ask_yn "Enable mobile builds (iOS/Android)?" "n" ENABLE_MOBILE
     FRONTEND_DIR="."
     ask "Frontend directory" "$FRONTEND_DIR" FRONTEND_DIR
+    if [ "$ENABLE_PREVIEWS" = true ]; then
+      ask "Preview domain (e.g. previews.example.com)" "" PREVIEW_DOMAIN
+      PREVIEW_BUCKET="${APP_NAME_LOWER:-$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')}-previews"
+      ask "Preview S3 bucket name" "$PREVIEW_BUCKET" PREVIEW_BUCKET
+    fi
     ;;
   *"backend-only"*)
     ask_yn "Enable PostgreSQL for tests?" "y" ENABLE_POSTGRES
@@ -221,12 +236,8 @@ generate_common_domain_inputs() {
   local env_name="$1"
   local domain="${2:-}"
   if [ -n "$domain" ]; then
-    local display_domain="$domain"
-    if [ "$env_name" = "staging" ]; then
-      display_domain="staging-${domain}"
-    fi
-    echo "      custom-domain: ${display_domain}"
-    echo "      health-check-url: https://${display_domain}"
+    echo "      custom-domain: ${domain}"
+    echo "      health-check-url: https://${domain}"
   fi
 }
 
@@ -387,17 +398,17 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
 HEADER
 
-  # Add tags trigger when iOS builds are enabled (needed for tag-gated builds)
+  # Add tags trigger when mobile builds are enabled (needed for tag-gated builds)
   if [ "$ENABLE_MOBILE" = true ]; then
     echo '    tags: ["v*"]'
   fi
 
   cat <<HEADER
   pull_request:
-    branches: [main, staging]
+    branches: [main]
 
 jobs:
 HEADER
@@ -455,15 +466,6 @@ JOB
 
   if [[ "$PROJECT_TYPE" == *"docker"* ]]; then
     cat <<JOB
-  docker-staging:
-    needs: [test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
-    uses: ${TEMPLATES_REPO}/.github/workflows/docker-build.yml@${TEMPLATES_REF}
-    with:
-      context: "${DOCKER_CONTEXT}"
-      dockerfile: "${DOCKERFILE_PATH}"
-      tag-strategy: branch
-
   docker-production:
     needs: [test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -475,7 +477,6 @@ JOB
 
 JOB
   else
-    # AWS deploy jobs
     case "$PROJECT_TYPE" in
       *"full-stack"*)
         NEEDS="test-backend, test-frontend";;
@@ -485,7 +486,49 @@ JOB
         NEEDS="test-backend";;
     esac
 
-    generate_deploy_job "staging" "staging" "staging/terraform.tfstate" "$CUSTOM_DOMAIN" "$NEEDS"
+    # ── Per-PR Preview Deployments ──
+    if [ "$ENABLE_PREVIEWS" = true ] && [[ "$CLOUD_PROVIDER" == *"AWS"* ]]; then
+      cat <<JOB
+  # ── Per-PR Preview Deployments ──
+  # Frontend-only previews that share the staging backend API.
+  # Requires: terraform/preview-aws module applied once, then
+  # set PREVIEW_CLOUDFRONT_ID secret from the terraform output.
+  preview:
+    if: github.event_name == 'pull_request'
+    uses: ${TEMPLATES_REPO}/.github/workflows/preview-deploy.yml@${TEMPLATES_REF}
+    with:
+      preview-domain: ${PREVIEW_DOMAIN}
+      preview-bucket: ${PREVIEW_BUCKET}
+      frontend-dir: ${FRONTEND_DIR}
+      aws-region: ${AWS_REGION}
+JOB
+      if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
+        echo "      aws-role-arn: ${AWS_ROLE_ARN:-arn:aws:iam::ACCOUNT_ID:role/github-actions-deploy}"
+      fi
+      cat <<JOB
+    secrets:
+      PREVIEW_CLOUDFRONT_ID: \${{ secrets.PREVIEW_CLOUDFRONT_ID }}
+      VITE_ENV_VARS: |
+        VITE_API_URL=\${{ secrets.API_URL_STAGING }}
+
+  preview-cleanup:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    uses: ${TEMPLATES_REPO}/.github/workflows/preview-cleanup.yml@${TEMPLATES_REF}
+    with:
+      preview-bucket: ${PREVIEW_BUCKET}
+      aws-region: ${AWS_REGION}
+JOB
+      if [[ "$AUTH_METHOD" == *"OIDC"* ]]; then
+        echo "      aws-role-arn: ${AWS_ROLE_ARN:-arn:aws:iam::ACCOUNT_ID:role/github-actions-deploy}"
+      fi
+      cat <<JOB
+    secrets:
+      PREVIEW_CLOUDFRONT_ID: \${{ secrets.PREVIEW_CLOUDFRONT_ID }}
+
+JOB
+    fi
+
+    # ── Production Deploy ──
     generate_deploy_job "production" "main" "prod/terraform.tfstate" "$CUSTOM_DOMAIN" "$NEEDS"
   fi
 
@@ -514,17 +557,16 @@ JOB
       mobile_needs="test-frontend"
     fi
     cat <<JOB
+  # Mobile builds gated to release tags only to protect CI minutes.
+  # iOS uses macOS runners (10x minute multiplier).
   android:
     needs: [${mobile_needs}]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/')
     uses: ${TEMPLATES_REPO}/.github/workflows/android-build.yml@${TEMPLATES_REF}
     with:
       working-directory: "${FRONTEND_DIR}"
       app-id: com.example.${APP_NAME_LOWER}
 
-  # iOS builds use macOS runners (10x minute multiplier).
-  # Gated to tags (releases) only to protect free tier.
-  # A single 10-min build = 100 of your 2,000 monthly minutes.
   ios:
     needs: [${mobile_needs}]
     if: startsWith(github.ref, 'refs/tags/')
@@ -673,13 +715,20 @@ if [[ "$PROJECT_TYPE" != *"docker"* ]]; then
   echo ""
   echo -e "  ${YELLOW}Per environment:${NC}"
   if [[ "$PROJECT_TYPE" != *"frontend-only"* ]]; then
-    echo "    DATABASE_URL_STAGING"
     echo "    DATABASE_URL_PRODUCTION"
   fi
   if [[ "$PROJECT_TYPE" == *"frontend"* ]] || [[ "$PROJECT_TYPE" == *"full-stack"* ]]; then
-    echo "    API_URL_STAGING"
     echo "    API_URL_PRODUCTION"
+    if [ "$ENABLE_PREVIEWS" = true ]; then
+      echo "    API_URL_STAGING (used by preview deployments)"
+    fi
   fi
+fi
+
+if [ "$ENABLE_PREVIEWS" = true ]; then
+  echo ""
+  echo -e "  ${YELLOW}Preview deployments:${NC}"
+  echo "    PREVIEW_CLOUDFRONT_ID (from terraform output after applying preview-aws module)"
 fi
 
 if [ "$ENABLE_TELEGRAM" = true ]; then
@@ -717,6 +766,26 @@ if [[ "$AUTH_METHOD" == *"OIDC"* ]] || [[ "$AUTH_METHOD" == *"Workload"* ]]; the
       echo -e "  3. Copy outputs ${CYAN}client_id${NC} and ${CYAN}tenant_id${NC} into your ci.yml"
       ;;
   esac
+fi
+
+if [ "$ENABLE_PREVIEWS" = true ]; then
+  echo ""
+  echo -e "${BOLD}Preview Deployments Setup (one-time):${NC}"
+  echo -e "  1. Apply the preview Terraform module:"
+  echo -e "     ${DIM}# In your project's infra/ directory, add:${NC}"
+  echo -e "     ${DIM}module \"previews\" {${NC}"
+  echo -e "     ${DIM}  source              = \"github.com/${TEMPLATES_REPO}//terraform/preview-aws\"${NC}"
+  echo -e "     ${DIM}  project_name        = \"${APP_NAME_LOWER}\"${NC}"
+  echo -e "     ${DIM}  preview_domain      = \"${PREVIEW_DOMAIN}\"${NC}"
+  echo -e "     ${DIM}  acm_certificate_arn = var.acm_certificate_arn${NC}"
+  echo -e "     ${DIM}}${NC}"
+  echo -e "  2. ${DIM}terraform apply${NC}"
+  echo -e "  3. Set GitHub secret: ${CYAN}PREVIEW_CLOUDFRONT_ID${NC} = terraform output cloudfront_id"
+  echo -e "  4. Add DNS CNAME: ${CYAN}${PREVIEW_DOMAIN}${NC} -> terraform output cloudfront_domain"
+  echo ""
+  echo -e "  ${YELLOW}SPA routing note:${NC} Set your router's basename to \${VITE_BASE_PATH}:"
+  echo -e "  ${DIM}<BrowserRouter basename={import.meta.env.VITE_BASE_PATH || '/'}>  ${NC}"
+  echo -e "  ${DIM}Update hardcoded asset paths to use import.meta.env.BASE_URL${NC}"
 fi
 
 echo ""

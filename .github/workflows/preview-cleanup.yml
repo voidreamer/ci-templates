@@ -1,0 +1,104 @@
+# Reusable workflow: Preview Cleanup
+# Removes preview deployment when a PR is closed or merged
+#
+# Usage:
+#   preview-cleanup:
+#     uses: voidreamer/ci-templates/.github/workflows/preview-cleanup.yml@main
+#     with:
+#       preview-bucket: my-app-previews
+#     secrets:
+#       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+name: Preview Cleanup
+
+on:
+  workflow_call:
+    inputs:
+      preview-bucket:
+        description: "S3 bucket name for preview builds"
+        required: true
+        type: string
+      aws-region:
+        description: "AWS region"
+        required: false
+        type: string
+        default: "us-east-1"
+      aws-role-arn:
+        description: "IAM role ARN for OIDC auth (recommended over static keys)"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  cleanup-preview:
+    name: Remove Preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        if: inputs.aws-role-arn != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Configure AWS credentials (static keys)
+        if: inputs.aws-role-arn == ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Delete preview from S3
+        run: |
+          PR_NUM=${{ github.event.pull_request.number }}
+          echo "Cleaning up preview for PR #${PR_NUM}..."
+
+          OBJECT_COUNT=$(aws s3 ls "s3://${{ inputs.preview-bucket }}/pr-${PR_NUM}/" --recursive | wc -l)
+
+          if [ "$OBJECT_COUNT" -gt 0 ]; then
+            aws s3 rm "s3://${{ inputs.preview-bucket }}/pr-${PR_NUM}/" \
+              --recursive \
+              --no-cli-pager
+            echo "Removed ${OBJECT_COUNT} files from s3://${{ inputs.preview-bucket }}/pr-${PR_NUM}/"
+          else
+            echo "No preview found for PR #${PR_NUM} — nothing to clean up"
+          fi
+
+      - name: Update PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Preview Deployment')
+            );
+
+            if (botComment) {
+              const merged = context.payload.pull_request.merged;
+              const status = merged ? 'Merged' : 'Closed';
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: `## Preview Deployment\n\n~~Preview removed~~ — PR ${status}.`,
+              });
+            }

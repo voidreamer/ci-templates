@@ -1,0 +1,198 @@
+# Reusable workflow: Preview Deploy
+# Deploys frontend to a per-PR preview URL
+#
+# Usage:
+#   preview:
+#     uses: voidreamer/ci-templates/.github/workflows/preview-deploy.yml@main
+#     with:
+#       preview-domain: previews.example.com
+#       preview-bucket: my-app-previews
+#       frontend-dir: frontend
+#     secrets:
+#       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#       PREVIEW_CLOUDFRONT_ID: ${{ secrets.PREVIEW_CLOUDFRONT_ID }}
+#       VITE_ENV_VARS: |
+#         VITE_API_URL=${{ secrets.API_URL_STAGING }}
+
+name: Preview Deploy
+
+on:
+  workflow_call:
+    inputs:
+      preview-domain:
+        description: "Domain for previews (e.g. previews.example.com)"
+        required: true
+        type: string
+      preview-bucket:
+        description: "S3 bucket name for preview builds"
+        required: true
+        type: string
+      frontend-dir:
+        description: "Frontend directory"
+        required: false
+        type: string
+        default: "frontend"
+      node-version:
+        description: "Node.js version"
+        required: false
+        type: string
+        default: "22"
+      aws-region:
+        description: "AWS region"
+        required: false
+        type: string
+        default: "us-east-1"
+      aws-role-arn:
+        description: "IAM role ARN for OIDC auth (recommended over static keys)"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      PREVIEW_CLOUDFRONT_ID:
+        required: false
+      VITE_ENV_VARS:
+        required: false
+        description: "Newline-separated VITE_xxx=value pairs for frontend build"
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  deploy-preview:
+    name: Deploy Preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check preview infra is ready
+        id: check-infra
+        env:
+          PREVIEW_CF_ID: ${{ secrets.PREVIEW_CLOUDFRONT_ID }}
+        run: |
+          if [ -z "$PREVIEW_CF_ID" ]; then
+            echo "PREVIEW_CLOUDFRONT_ID secret not set — preview infra not provisioned yet."
+            echo "Run terraform apply to create the preview S3 bucket and CloudFront distribution."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout code
+        if: steps.check-infra.outputs.skip != 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        if: steps.check-infra.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.frontend-dir }}/package-lock.json
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.check-infra.outputs.skip != 'true' && inputs.aws-role-arn != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Configure AWS credentials (static keys)
+        if: steps.check-infra.outputs.skip != 'true' && inputs.aws-role-arn == ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Install dependencies
+        if: steps.check-infra.outputs.skip != 'true'
+        working-directory: ${{ inputs.frontend-dir }}
+        run: npm ci
+
+      - name: Build frontend
+        if: steps.check-infra.outputs.skip != 'true'
+        working-directory: ${{ inputs.frontend-dir }}
+        env:
+          VITE_ENV_VARS: ${{ secrets.VITE_ENV_VARS }}
+        run: |
+          # Inject VITE env vars from secret
+          if [ -n "$VITE_ENV_VARS" ]; then
+            while IFS= read -r line; do
+              [ -n "$line" ] && export "$line"
+            done <<< "$VITE_ENV_VARS"
+          fi
+          PR_NUM=${{ github.event.pull_request.number }}
+          export VITE_BASE_PATH="/pr-${PR_NUM}/"
+          npm run build -- --base "/pr-${PR_NUM}/"
+
+      - name: Deploy to S3
+        if: steps.check-infra.outputs.skip != 'true'
+        run: |
+          PR_NUM=${{ github.event.pull_request.number }}
+          aws s3 sync ${{ inputs.frontend-dir }}/dist/ "s3://${{ inputs.preview-bucket }}/pr-${PR_NUM}/" \
+            --delete \
+            --no-cli-pager
+
+      - name: Invalidate CloudFront cache
+        if: steps.check-infra.outputs.skip != 'true'
+        env:
+          PREVIEW_CF_ID: ${{ secrets.PREVIEW_CLOUDFRONT_ID }}
+        run: |
+          PR_NUM=${{ github.event.pull_request.number }}
+          aws cloudfront create-invalidation \
+            --distribution-id "$PREVIEW_CF_ID" \
+            --paths "/pr-${PR_NUM}/*" \
+            --no-cli-pager
+
+      - name: Post or update PR comment
+        if: steps.check-infra.outputs.skip != 'true'
+        uses: actions/github-script@v7
+        env:
+          PREVIEW_DOMAIN: ${{ inputs.preview-domain }}
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const previewUrl = `https://${process.env.PREVIEW_DOMAIN}/pr-${prNumber}/`;
+            const body = [
+              `## Preview Deployment`,
+              ``,
+              `| | |`,
+              `|---|---|`,
+              `| **URL** | [${previewUrl}](${previewUrl}) |`,
+              `| **Branch** | \`${context.payload.pull_request.head.ref}\` |`,
+              `| **Commit** | \`${context.sha.slice(0, 7)}\` |`,
+              ``,
+              `> Preview will be removed when this PR is closed.`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Preview Deployment')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }

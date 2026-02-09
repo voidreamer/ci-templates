@@ -84,6 +84,8 @@ jobs:
 | `lighthouse.yml` | Lighthouse CI performance audit | `working-directory`, `config-path` |
 | `android-build.yml` | Capacitor Android debug APK build | `node-version`, `java-version` |
 | `ios-build.yml` | Capacitor iOS simulator build | `node-version`, `working-directory` |
+| `preview-deploy.yml` | Per-PR frontend preview deployments (S3 + CloudFront) | `preview-domain`, `preview-bucket`, `aws-role-arn` |
+| `preview-cleanup.yml` | Clean up preview deployment when PR is closed | `preview-bucket`, `aws-role-arn` |
 | `dependabot-merge.yml` | Auto-merge Dependabot PRs (patch/minor) | `update-types` |
 | `release.yml` | Create releases and update major version tags | *(internal)* |
 
@@ -275,12 +277,85 @@ with:
   app-id: com.example.myapp
 ```
 
+### preview-deploy.yml
+
+Deploys a frontend preview for each pull request. Each PR gets its own URL at `https://{preview-domain}/pr-{number}/`. Previews share a staging backend API, so only the frontend is deployed per PR.
+
+Requires the `terraform/preview-aws` module to be applied first (one-time setup).
+
+Features:
+- **Graceful skip**: If `PREVIEW_CLOUDFRONT_ID` secret isn't set (infra not ready yet), the workflow skips instead of failing
+- **Sub-path routing**: Builds with Vite `--base "/pr-{N}/"` so assets resolve correctly
+- **VITE_ENV_VARS injection**: Pass environment variables for the frontend build (e.g. staging API URL)
+- **PR comments**: Posts the preview URL as a comment on the PR, updates it on subsequent pushes
+- **OIDC authentication**: Supports keyless AWS auth via `aws-role-arn`
+
+```yaml
+preview:
+  if: github.event_name == 'pull_request'
+  uses: voidreamer/ci-templates/.github/workflows/preview-deploy.yml@main
+  with:
+    preview-domain: previews.example.com
+    preview-bucket: my-app-previews
+    frontend-dir: frontend
+    aws-role-arn: arn:aws:iam::123456789012:role/github-actions-deploy
+  secrets:
+    PREVIEW_CLOUDFRONT_ID: ${{ secrets.PREVIEW_CLOUDFRONT_ID }}
+    VITE_ENV_VARS: |
+      VITE_API_URL=${{ secrets.API_URL_STAGING }}
+```
+
+**SPA routing note**: For sub-path previews to work with client-side routing (React Router, Vue Router, etc.), your app needs to set the router's `basename` to the `VITE_BASE_PATH` environment variable. The workflow sets this automatically. Example for React Router:
+
+```tsx
+<BrowserRouter basename={import.meta.env.VITE_BASE_PATH || '/'}>
+```
+
+Also update any hardcoded absolute asset paths (e.g. `/icons/logo.png`) to use `import.meta.env.BASE_URL` so they resolve under the `/pr-{N}/` prefix.
+
+### preview-cleanup.yml
+
+Automatically cleans up preview deployments when a PR is closed or merged. Deletes all files under `pr-{number}/` from S3 and invalidates the CloudFront cache.
+
+```yaml
+preview-cleanup:
+  uses: voidreamer/ci-templates/.github/workflows/preview-cleanup.yml@main
+  with:
+    preview-bucket: my-app-previews
+    aws-role-arn: arn:aws:iam::123456789012:role/github-actions-deploy
+  secrets:
+    PREVIEW_CLOUDFRONT_ID: ${{ secrets.PREVIEW_CLOUDFRONT_ID }}
+```
+
+### terraform/preview-aws (Terraform Module)
+
+One-time infrastructure for preview deployments. Creates a shared S3 bucket and CloudFront distribution that all PR previews share.
+
+```hcl
+module "previews" {
+  source              = "github.com/voidreamer/ci-templates//terraform/preview-aws"
+  project_name        = "my-app"
+  preview_domain      = "previews.example.com"
+  acm_certificate_arn = var.acm_certificate_arn
+}
+```
+
+After applying:
+1. Set GitHub secret: `PREVIEW_CLOUDFRONT_ID` = `module.previews.cloudfront_id`
+2. Add DNS CNAME: `previews.example.com` → `module.previews.cloudfront_domain`
+
+Resources created:
+- S3 bucket with 30-day auto-expiration (safety net for orphaned previews)
+- CloudFront distribution with OAC (no public S3 access)
+- CloudFront Function for SPA routing under `/pr-{N}/` prefixes
+- Bucket policy restricted to CloudFront only
+
 ## Examples
 
 Complete example pipelines are available in the `examples/` directory:
 
-- `examples/full-stack.yml`: Full pipeline with backend tests, frontend tests, Lighthouse, staging/production deploys, and mobile builds
-- `examples/frontend-only.yml`: Frontend-only project with S3 + CloudFront deploy
+- `examples/full-stack.yml`: Full pipeline with backend tests, frontend tests, Lighthouse, per-PR preview deployments, production deploy, and mobile builds
+- `examples/frontend-only.yml`: Frontend-only project with S3 + CloudFront deploy and per-PR previews
 
 ## OIDC Authentication (Recommended)
 
